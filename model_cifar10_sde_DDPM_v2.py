@@ -38,6 +38,9 @@ class CIFAR10Diffusion_SDE_V2(_CIFAR10Diffusion_SDE_Base):
         attn_resolutions: Sequence[int] = (16, 8),
         num_res_blocks: int = 2,
         dropout: float = 0.1,
+        T: float = 2.0,
+        k: float = 1.0,
+        Tp: float = 1.0,
     ):
         super().__init__(
             image_size=image_size,
@@ -47,6 +50,9 @@ class CIFAR10Diffusion_SDE_V2(_CIFAR10Diffusion_SDE_Base):
             base_dim=base_dim,
             dim_mults=list(dim_mults),
             num_res_blocks=num_res_blocks,
+            T=T,
+            k=k,
+            Tp=Tp,
         )
 
         # Replace the UNet with a configurable-attention version.

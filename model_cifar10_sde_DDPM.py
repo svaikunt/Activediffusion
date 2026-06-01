@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-import numpy as np
 from tqdm import tqdm
 from unet_DDPM import Unet
 
@@ -162,13 +161,18 @@ class CIFAR10Diffusion_SDE(nn.Module):
         base_dim=64,
         dim_mults=[1, 2, 2, 2],
         num_res_blocks=2,
+        T=2.0,
+        k=1.0,
+        Tp=1.0,
     ):
         super().__init__()
         self.timesteps = timesteps
         self.in_channels = in_channels
         self.image_size = image_size
-        self.dt = 2/timesteps  # Same as MNIST: time range [0, 2]
-        self.time_range = 2.0
+        self.time_range = T
+        self.dt = T / timesteps
+        self.k = k
+        self.Tp = Tp
         
         self.model = Unet(
             timesteps,
@@ -222,18 +226,15 @@ class CIFAR10Diffusion_SDE(nn.Module):
         for the basic diffusion SDE: dx = - x * dt + dw
         EXACTLY like MNIST implementation
         """
-        # Compute mean: x_0 * exp(-t)
-        mean = x_0 * torch.exp(-t)[:, None, None, None]
-        
-        # Compute standard deviation: sqrt(1 - exp(-2*t))
-        std = torch.sqrt(1 - torch.exp(-2*t))[:, None, None, None]
+        mean = x_0 * torch.exp(-self.k * t)[:, None, None, None]
+        std = torch.sqrt((self.Tp / self.k) * (1 - torch.exp(-2 * self.k * t)))[:, None, None, None]
         
         return mean, std
 
     def forward(self, x, noise):
         """Forward pass - EXACTLY like MNIST"""
         # Generate random time between 0 and 2
-        t = 1e-3 + (2-1e-3)*torch.rand(x.shape[0], device=x.device)
+        t = 1e-3 + (self.time_range - 1e-3) * torch.rand(x.shape[0], device=x.device)
         
         # Get noisy image and score
         mean, std = self.marginal_prob(x, t)
@@ -260,9 +261,10 @@ class CIFAR10Diffusion_SDE(nn.Module):
         Generate samples using Euler-Maruyama solver for the reverse-time SDE
         EXACTLY like MNIST implementation
         """
-        # Initialize from standard normal
+        # Initialize from stationary distribution N(0, Tp/k)
         x_t = torch.randn((n_samples, self.in_channels, self.image_size, self.image_size)).to(device)
-        
+        x_t = x_t * math.sqrt(self.Tp / self.k)
+
         if probability_flow and pf_solver == "rk45":
             t0 = float(self.time_range)
             t1 = 0.0
@@ -274,7 +276,7 @@ class CIFAR10Diffusion_SDE(nn.Module):
             def drift_fn(x, t_scalar: float):
                 t_tensor = torch.full((n_samples,), float(t_scalar), device=device)
                 score = self.model(x, self._normalize_time(t_tensor))
-                return -x - score
+                return -self.k * x - self.Tp * score
 
             x_t = _rk45_integrate(
                 drift_fn,
@@ -287,7 +289,7 @@ class CIFAR10Diffusion_SDE(nn.Module):
                 max_step_abs=max_step_abs,
             )
         elif probability_flow:
-            # Heun-Kutta (HK) integration for the PF-ODE
+            # Heun-Kutta (HK) integration for the PF-ODE: dx/dt = -k*x - Tp*score
             time_grid = self._build_pf_time_grid(pf_steps, pf_schedule, x_t.device)
             for idx in tqdm(range(len(time_grid) - 1), desc="Sampling (PF-ODE, HK)"):
                 t_curr = time_grid[idx]
@@ -297,31 +299,29 @@ class CIFAR10Diffusion_SDE(nn.Module):
                 # First stage (Euler predictor at t_curr)
                 t_curr_tensor = torch.full((n_samples,), t_curr.item(), device=device)
                 score_curr = self.model(x_t, self._normalize_time(t_curr_tensor))
-                drift_curr = -x_t - score_curr
+                drift_curr = -self.k * x_t - self.Tp * score_curr
 
                 x_pred = x_t - drift_curr * dt  # Euler prediction to t_next
 
                 # Second stage (corrector using drift at t_next)
                 t_next_tensor = torch.full((n_samples,), t_next.item(), device=device)
                 score_next = self.model(x_pred, self._normalize_time(t_next_tensor))
-                drift_next = -x_pred - score_next
+                drift_next = -self.k * x_pred - self.Tp * score_next
 
                 # Heun update (average of drifts)
                 x_t = x_t - 0.5 * (drift_curr + drift_next) * dt
         else:
+            noise_scale = math.sqrt(2 * self.Tp * self.dt)
             for i in tqdm(range(self.timesteps-1, -1, -1), desc="Sampling"):
                 t = torch.full((n_samples,), i * self.dt, device=device)
-                t_embed = self._normalize_time(t)
-                score = self.model(x_t, t_embed)
+                score = self.model(x_t, self._normalize_time(t))
 
-                drift = -x_t - 2 * score
+                drift = -self.k * x_t - 2 * self.Tp * score
                 x_t = x_t - drift * self.dt
-                
+
                 # Add noise for all steps except the final one (i=0)
                 if i > 0:
-                    diffusion = torch.sqrt(torch.ones_like(t))
-                    noise = torch.randn_like(x_t)
-                    x_t = x_t + diffusion[:, None, None, None] * np.sqrt(2 * self.dt) * noise
+                    x_t = x_t + noise_scale * torch.randn_like(x_t)
         
         # Scale to [0, 1] range
         x_t = x_t.clip(-1, 1)
@@ -350,7 +350,7 @@ class CIFAR10Diffusion_SDE(nn.Module):
             def drift_fn(x, t_scalar: float):
                 t_tensor = torch.full((batch_size,), float(t_scalar), device=device)
                 score = self.model(x, self._normalize_time(t_tensor))
-                return -x - score
+                return -self.k * x - self.Tp * score
 
             x_t = _rk45_integrate(
                 drift_fn,
@@ -374,30 +374,28 @@ class CIFAR10Diffusion_SDE(nn.Module):
                 # First stage (Euler predictor at t_curr)
                 t_curr_tensor = torch.full((batch_size,), t_curr.item(), device=device)
                 score_curr = self.model(x_t, self._normalize_time(t_curr_tensor))
-                drift_curr = -x_t - score_curr
+                drift_curr = -self.k * x_t - self.Tp * score_curr
 
                 x_pred = x_t - drift_curr * dt  # Euler prediction to t_next
 
                 # Second stage (corrector using drift at t_next)
                 t_next_tensor = torch.full((batch_size,), t_next.item(), device=device)
                 score_next = self.model(x_pred, self._normalize_time(t_next_tensor))
-                drift_next = -x_pred - score_next
+                drift_next = -self.k * x_pred - self.Tp * score_next
 
                 # Heun update (average of drifts)
                 x_t = x_t - 0.5 * (drift_curr + drift_next) * dt
         else:
+            noise_scale = math.sqrt(2 * self.Tp * self.dt)
             for i in tqdm(range(adjusted_t_start, -1, -1), desc="Sampling from intermediate"):
                 t = torch.full((batch_size,), i * self.dt, device=device)
-                t_embed = self._normalize_time(t)
-                score = self.model(x_t, t_embed)
-                drift = -x_t - 2 * score
+                score = self.model(x_t, self._normalize_time(t))
+                drift = -self.k * x_t - 2 * self.Tp * score
                 x_t = x_t - drift * self.dt
-                
+
                 # Add noise for all steps except the final one (i=0)
                 if i > 0:
-                    diffusion = torch.sqrt(torch.ones_like(t))
-                    noise = torch.randn_like(x_t)
-                    x_t = x_t + diffusion[:, None, None, None] * np.sqrt(2 * self.dt) * noise
+                    x_t = x_t + noise_scale * torch.randn_like(x_t)
         
         # Scale to [0, 1] range
         x_t = x_t.clip(-1, 1)
@@ -419,7 +417,7 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
         Tp=1e-3,
         Ta=1.0,
         k=1.0,
-        tau=0.1,
+        tau=0.4,
         T=2.0,
     ):
         super().__init__()

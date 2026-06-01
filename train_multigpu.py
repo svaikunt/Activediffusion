@@ -211,6 +211,9 @@ def main():
             dim_mults=dim_mults,
             attn_resolutions=attn_resolutions,
             num_res_blocks=args.num_res_blocks,
+            T=args.T,
+            k=args.k,
+            Tp=args.Tp,
         )
     
     model = model.to(device)
@@ -296,7 +299,7 @@ def main():
                         noise = torch.randn_like(images)
                         x_t, score, mean, std = model.forward(images, noise)
                         true_score = -(x_t - mean) / (std ** 2)
-                        loss = torch.nn.functional.mse_loss((std ** 2) * score, (std ** 2) * true_score)
+                        loss = torch.nn.functional.mse_loss(std * score, std * true_score)
             else:
                 if args.active:
                     eta_0 = base_model.generate_eta0(images.shape[0], device=device)
