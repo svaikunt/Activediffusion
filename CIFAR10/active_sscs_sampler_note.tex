@@ -1,0 +1,292 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb}
+\usepackage[margin=1.2in]{geometry}
+\usepackage{booktabs}
+\usepackage{hyperref}
+
+\title{An Exact-Linear-Step (SSCS-style) Sampler for the Active Model\\
+\large Error Analysis vs. Euler--Maruyama}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Setup: forward and reverse SDEs}
+
+From \texttt{compute\_mean} in \texttt{model\_cifar10\_sde\_DDPM.py}, the forward
+(noising) process for the active model is the linear system
+\begin{equation}
+dx = (-kx + \eta)\,dt + \sqrt{2T_p}\,dW_x,
+\qquad
+d\eta = -\frac{\eta}{\tau}\,dt + \frac{1}{\tau}\sqrt{2T_a}\,dW_\eta,
+\label{eq:forward}
+\end{equation}
+with $dW_x \perp dW_\eta$. Writing $z = (x,\eta)^\top$, this is $dz = Az\,dt + B\,dW$ with
+\begin{equation}
+A = \begin{pmatrix} -k & 1 \\ 0 & -1/\tau \end{pmatrix},
+\qquad
+Q \equiv BB^\top = \begin{pmatrix} 2T_p & 0 \\ 0 & 2T_a/\tau^2 \end{pmatrix}.
+\end{equation}
+
+The current sampler (\texttt{sampling()}, lines 810--839) discretizes the
+score-corrected \emph{reverse}-time SDE
+\begin{equation}
+dx = \Big[(kx - \eta) + 2T_p F_x\Big]dt + \sqrt{2T_p}\,dW_x,
+\qquad
+d\eta = \Big[\frac{\eta}{\tau} + \frac{2T_a}{\tau^2}F_\eta\Big]dt + \frac{1}{\tau}\sqrt{2T_a}\,dW_\eta,
+\label{eq:reverse}
+\end{equation}
+where $(F_x,F_\eta)$ is the network's score output, using plain
+Euler--Maruyama (EM) with fixed step $dt$.
+
+\section{Splitting: linear part $L$ vs.\ score part $N$}
+
+The reverse drift in \eqref{eq:reverse} splits additively into a \emph{linear}
+part and a \emph{nonlinear} (score) part:
+\begin{equation}
+\underbrace{\begin{pmatrix} kx-\eta \\ \eta/\tau \end{pmatrix}}_{\tilde A z,\ \ \tilde A = -A}
+\;+\;
+\underbrace{\begin{pmatrix} 2T_p F_x \\ (2T_a/\tau^2) F_\eta \end{pmatrix}}_{\text{Force}(z)}.
+\end{equation}
+The key fact: the $\tilde A z$ part, together with its own noise, is an
+\emph{exactly solvable} linear SDE — the same OU structure as the forward
+process in \eqref{eq:forward}, just with the sign of the drift flipped
+($\tilde A = -A$). We integrate that part in closed form and reserve
+Euler only for the genuinely nonlinear score term.
+
+\subsection{Exact solution of $L$: $dz = \tilde A z\,dt + B\,dW$}
+
+Diagonalizing $\tilde A = \begin{pmatrix} k & -1 \\ 0 & 1/\tau\end{pmatrix}$
+(eigenvalues $k,\ 1/\tau$, assumed distinct — same non-degeneracy already
+assumed by \texttt{compute\_mean}) gives
+\begin{equation}
+e^{\tilde A u} =
+\begin{pmatrix}
+e_1(u) & \dfrac{e_2(u)-e_1(u)}{\Delta} \\[6pt]
+0 & e_2(u)
+\end{pmatrix},
+\qquad
+e_1(u) = e^{ku},\quad e_2(u) = e^{u/\tau},\quad \Delta = k - \frac{1}{\tau}.
+\end{equation}
+
+\paragraph{Mean.} Over a step of length $s$, starting from $(x_0,\eta_0)$:
+\begin{equation}
+\bar x(s) = e_1(s)\,x_0 + \frac{e_2(s)-e_1(s)}{\Delta}\,\eta_0,
+\qquad
+\bar\eta(s) = e_2(s)\,\eta_0.
+\label{eq:mean-exact}
+\end{equation}
+(This is algebraically identical to \texttt{compute\_mean}$(x_0,\eta_0,t{=}{-}s)$ —
+the reverse linear flow is the forward linear flow run at negative time,
+since $\tilde A = -A$.)
+
+\paragraph{Covariance.} The noise covariance is \emph{not} simply the forward
+covariance at $t=-s$, because $Q$ (fixed) enters the Lyapunov integral
+$\Sigma(s)=\int_0^s e^{\tilde A u}Q\,e^{\tilde A^\top u}\,du$ with the flipped-sign
+propagator. Carrying out the integral (with $q_1=2T_p$, $q_2=2T_a/\tau^2$):
+\begin{align}
+\Sigma_{\eta\eta}(s) &= \frac{T_a}{\tau}\big(e_2(s)^2-1\big),
+\label{eq:cov-etaeta}\\[4pt]
+\Sigma_{x\eta}(s) &= \frac{q_2}{\Delta}
+\left[\frac{\tau}{2}\big(e_2(s)^2-1\big) - \frac{e_1(s)e_2(s)-1}{k+1/\tau}\right],
+\label{eq:cov-xeta}\\[4pt]
+\Sigma_{xx}(s) &= \frac{q_1\big(e_1(s)^2-1\big)}{2k}
++ \frac{q_2}{\Delta^2}
+\left[\frac{\tau}{2}\big(e_2(s)^2-1\big) - \frac{2\big(e_1(s)e_2(s)-1\big)}{k+1/\tau} + \frac{e_1(s)^2-1}{2k}\right].
+\label{eq:cov-xx}
+\end{align}
+\emph{(Sanity check: as $s\to0$, $\Sigma_{\eta\eta}\to q_2 s$, $\Sigma_{xx}\to q_1 s$,
+$\Sigma_{x\eta}=O(s^2)$ — matches independent-noise-source diffusion at leading
+order, since cross-correlation can only appear via drift coupling, which is
+higher order in $s$.)}
+
+Because $T_p,T_a,k,\tau$ are constants (no time-dependent noise schedule), the
+$2\times2$ matrix $[\bar x,\bar\eta] = M(s)[x_0,\eta_0]^\top$ and $\Sigma(s)$
+depend \emph{only on the step size $s$}, not on absolute time — so for a fixed
+step schedule, $M(dt/2)$ and $\Sigma(dt/2)$ can be precomputed once, outside
+the sampling loop.
+
+\section{The Strang-split (SSCS-style) update}
+
+For each outer step $dt$, with half-step $s = dt/2$:
+\begin{enumerate}
+\item \textbf{Analytic half-step} (exact, no network call): sample
+$(x',\eta') \sim \mathcal N\!\big(M(s)\,(x,\eta),\ \Sigma(s)\big)$ via
+\eqref{eq:mean-exact}--\eqref{eq:cov-xx} (Cholesky of $\Sigma(s)$, per channel).
+\item \textbf{Score Euler step} (one network evaluation, at $(x',\eta')$,
+time $t_{\rm curr}-dt/2$), deterministic only:
+\begin{equation}
+x'' = x' + 2T_p F_x\,dt, \qquad
+\eta'' = \eta' + \frac{2T_a}{\tau^2}F_\eta\,dt.
+\end{equation}
+\item \textbf{Analytic half-step again}, same formulas as step 1, applied to
+$(x'',\eta'')$, giving $(x_{\rm next},\eta_{\rm next})$.
+\end{enumerate}
+This uses exactly one network evaluation per outer step — the same cost as
+the current Euler--Maruyama loop.
+
+\section{Error analysis: why this beats Euler--Maruyama}
+
+\subsection{Euler--Maruyama: order and the stiffness problem}
+
+EM applied to \eqref{eq:reverse} has the standard orders
+$\text{(weak) }=1$, $\text{(strong)}=1/2$: global weak error $O(dt)$, global
+strong error $O(\sqrt{dt})$. But the more important issue here is not the
+asymptotic order — it is the \emph{size of the constant}, which blows up as
+$\tau\to 0$.
+
+Consider just the deterministic $\eta$-update in isolation:
+$d\eta/ds = \eta/\tau$. EM approximates the exact one-step propagator
+$e^{dt/\tau}$ by the linearization $1+dt/\tau$. The local (one-step)
+truncation error is
+\begin{equation}
+e^{dt/\tau} - \Big(1+\frac{dt}{\tau}\Big)
+= \frac{1}{2}\Big(\frac{dt}{\tau}\Big)^2 + O\!\Big(\big(\tfrac{dt}{\tau}\big)^3\Big).
+\label{eq:lte-em}
+\end{equation}
+This is the usual $O(dt^2)$ local truncation error of a first-order method —
+\emph{but} the coefficient scales as $1/\tau^2$. For fixed $dt$, shrinking
+$\tau$ inflates this error rapidly: once $dt/\tau \gtrsim 1$, the linear
+approximation $1+dt/\tau$ is no longer even close to $e^{dt/\tau}$, and the
+scheme is in the stiff/unstable regime (EM's stability threshold for a mode
+with rate $1/\tau$ requires $dt/\tau \lesssim 2$ just to stay bounded, let
+alone accurate). This is a direct, quantitative explanation for the
+tau$=0.25$ vs.\ tau$=0.45$ FID gap observed empirically: at fixed
+$dt = T/N_{\rm steps}$, the smaller $\tau$ pushes $dt/\tau$ higher, inflating
+exactly this term.
+
+\subsection{Exact linear step: removes the stiffness error entirely}
+
+Because \eqref{eq:mean-exact}--\eqref{eq:cov-xx} are the \emph{exact} solution
+of the linear part for \emph{any} step size $s$, this error term vanishes
+identically — not asymptotically, exactly — regardless of how large $dt/\tau$
+is. There is no discretization bias on the linear/OU part of the dynamics at
+any step size; the only question is how much of the reverse SDE's drift is
+linear vs.\ score-coupled, and the noise covariance is likewise exact (both
+mean and full covariance are closed-form, not approximated).
+
+\subsection{Remaining error: only from the score (splitting) term
+\emph{(corrected)}}
+
+\textbf{Caveat this section originally missed.} The claim below of full
+second-order accuracy is \emph{not correct as the scheme was described} in an
+earlier draft, and the fix requires stating things carefully.
+
+True Strang splitting is $e^{h(L+N)} \approx \varphi_L^{h/2}\circ e^{hN}\circ
+\varphi_L^{h/2}$, which requires the middle factor to be the \emph{exact} flow
+of $N$. Our middle step is instead a single frozen-force Euler update
+$z \mapsto z + hN(z)$ — an $O(h)$ (first-order) approximation of $e^{hN}$, not
+the exact flow. Expanding both the scheme and the true solution to $O(h^2)$
+(with $z=(x,\eta)$, $L(z)=(kx-\eta,\eta/\tau)$,
+$N(z) = (2T_pF_x,\ (2T_a/\tau^2)F_\eta)$) shows every cross term between $L$
+and $N$ ($L'L$, $L'N$, $N'L$) matches exactly between the two — this is the
+real benefit of symmetric placement: it cancels the $L$--$N$ \emph{splitting
+commutator} error that a naive sequential (Lie--Trotter) scheme would incur.
+What does \emph{not} cancel is the term intrinsic to how $N$ alone is
+integrated:
+\begin{equation}
+u_3 - z(dt) = -\frac{dt^2}{2}\,N'(z_0)N(z_0) + O(dt^3),
+\end{equation}
+because the true flow has $e^{dtN}(z_0) = z_0 + dt\,N(z_0) +
+\frac{dt^2}{2}N'(z_0)N(z_0) + O(dt^3)$ while Euler keeps only the first term.
+No amount of symmetric bracketing repairs an error internal to a single
+sub-flow's own integrator — only errors arising from \emph{interaction}
+between $L$ and $N$.
+
+Concretely, in the original variables,
+\begin{equation}
+N'(z)N(z) =
+\begin{pmatrix}
+4T_p^2 F_x\,\partial_xF_x + \dfrac{4T_pT_a}{\tau^2}F_\eta\,\partial_\eta F_x \\[8pt]
+\dfrac{4T_pT_a}{\tau^2}F_x\,\partial_xF_\eta + \dfrac{4T_a^2}{\tau^4}F_\eta\,\partial_\eta F_\eta
+\end{pmatrix},
+\end{equation}
+i.e.\ Jacobian--vector products of the network with itself. Two things are
+worth noting about this term: (i) it is genuinely present, so the scheme is
+\textbf{globally first order, not second order}; but (ii) it carries no
+$1/\tau$ divergence at fixed step size the way EM's linear-term error
+\eqref{eq:lte-em} does — the worst power of $\tau$ here is $\tau^{-4}$
+multiplying a \emph{bounded} network output, not an exponentially/rationally
+diverging linear term. So the practically dangerous, $\tau$-dependent
+stiffness error is still fully removed; what remains is a smooth,
+$\tau$-independent $O(dt^2)$ error from the score network's self-nonlinearity.
+
+\subsection{Summary \emph{(corrected)}}
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+& Euler--Maruyama & Exact-linear + symmetric split \\
+\midrule
+Linear ($x,\eta$ OU) part error & $O(dt^2/\tau^2)$ per step, stiff & $0$ (exact) \\
+$L$--$N$ splitting/commutator error & $O(dt^2)$ (present, unsandwiched) & $0$ (cancelled by symmetry) \\
+$N$ self-nonlinearity error & lumped into same term & $O(dt^2)$ per step, $\tau$-independent \\
+Global order & $1$ & $1$ \emph{(not 2 — corrected)} \\
+Behavior as $\tau\to0$ at fixed $dt$ & degrades (stiffness) & unaffected \\
+Network evals per step & 1 & 1 (same cost) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Getting to genuine second order}
+
+Two concrete routes, both worth weighing against the current 2-NFE Heun
+PF-ODE sampler already in the codebase:
+\begin{itemize}
+\item \textbf{RK2/midpoint $N$-step (2 NFEs per step).} Replace the Euler
+substep with a Heun-style predictor--corrector for $N$ alone (evaluate the
+score at $z'$, take an Euler predictor, evaluate the score again at the
+predicted point, average). This recovers the missing $\frac12 N'N$ term to
+leading order and restores genuine local error $O(dt^3)$ / global order $2$,
+at double the network cost per step.
+\item \textbf{Score extrapolation (1 NFE per step).} Approximate the missing
+term using previously computed score values instead of an extra evaluation
+at the current step — an Adams--Bashforth-style linear multistep exponential
+integrator, in the spirit of DPM-Solver \cite{lu2022dpmsolver} and DEIS
+\cite{zhang2022deis} for diffusion ODEs (both of which are built on exactly
+this exact-linear-part-plus-extrapolated-nonlinear-part idea). Needs a
+warm-start for the first step and some extra bookkeeping to cache scores
+across steps, but keeps the 1-NFE-per-step cost of the current sampler.
+\end{itemize}
+
+\section{Connection to CLD-SGM}
+
+This is the same construction as the Symmetric Splitting CLD Sampler (SSCS)
+in Dockhorn et al.\ (ICLR 2022): their auxiliary velocity variable $v$ plays
+the role of our $\eta$, their damping/friction parameters play the role of
+our $k,\tau$, and their \texttt{analytical\_dynamics} half-steps are the exact
+OU propagation derived above, sandwiching a \texttt{euler\_score\_dynamics}
+step that only touches the network-dependent force term. The one difference
+is that CLD's noise schedule $\beta(t)$ is time-dependent, so their
+closed-form coefficients involve $\beta_{\rm int}$; our $T_p,T_a,k,\tau$ are
+constant, which makes our half-step transition matrix and covariance
+step-size-only (precomputable once). \emph{Note:} Dockhorn et al.\ justify
+SSCS by the same stiffness-removal argument used here, not by a claim of
+formal second-order accuracy for the composed sampler — the order correction
+in \S4.3 applies equally to SSCS itself, not just to this adaptation of it.
+
+\begin{thebibliography}{3}
+\bibitem{dockhorn2022cld}
+T.~Dockhorn, A.~Vahdat, and K.~Kreis,
+\textit{Score-Based Generative Modeling with Critically-Damped Langevin Diffusion},
+ICLR 2022.
+\bibitem{song2021sde}
+Y.~Song, J.~Sohl-Dickstein, D.~P.~Kingma, A.~Kumar, S.~Ermon, and B.~Poole,
+\textit{Score-Based Generative Modeling through Stochastic Differential Equations},
+ICLR 2021.
+\bibitem{strang1968}
+G.~Strang,
+\textit{On the Construction and Comparison of Difference Schemes},
+SIAM J.\ Numer.\ Anal.\ 5(3), 1968.
+\bibitem{lu2022dpmsolver}
+C.~Lu, Y.~Zhou, F.~Bao, J.~Chen, C.~Li, and J.~Zhu,
+\textit{DPM-Solver: A Fast ODE Solver for Diffusion Probabilistic Model Sampling in Around 10 Steps},
+NeurIPS 2022.
+\bibitem{zhang2022deis}
+Q.~Zhang and Y.~Chen,
+\textit{Fast Sampling of Diffusion Models with Exponential Integrator},
+ICLR 2023.
+\end{thebibliography}
+
+\end{document}

@@ -72,6 +72,7 @@ def parse_args():
         help="Time discretization schedule for probability-flow sampling",
     )
     parser.add_argument("--pf_solver", type=str, default="heun", choices=["heun", "rk45"], help="PF-ODE solver (heun fixed-step or rk45 adaptive)")
+    parser.add_argument("--no_tweedie", action="store_true", help="Disable Tweedie denoising at final step (passive only)")
     return parser.parse_args()
 
 
@@ -258,6 +259,7 @@ def generate_samples(model, args, rank, world_size, is_main):
                 current_batch,
                 device=device,
                 probability_flow=args.probability_flow,
+                tweedie=not args.no_tweedie,
                 **pf_kwargs,
             )
 

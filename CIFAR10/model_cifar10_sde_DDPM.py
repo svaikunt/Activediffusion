@@ -204,8 +204,10 @@ class CIFAR10Diffusion_SDE(nn.Module):
             steps = self.timesteps
         steps = max(1, steps)
 
+        t_eps = 1e-3  # match training minimum time; avoid t=0 where model is untrained
+
         if schedule == "log" and steps > 1:
-            min_time = max(self.dt, 1e-4)
+            min_time = max(self.dt, t_eps)
             if start_time <= min_time:
                 schedule = "linear"
             else:
@@ -215,10 +217,9 @@ class CIFAR10Diffusion_SDE(nn.Module):
                     + idx * torch.log(torch.tensor(start_time / min_time, device=device))
                 )
                 times = torch.flip(asc, dims=[0])
-                times[-1] = 0.0
                 return times
 
-        return torch.linspace(start_time, 0.0, steps + 1, device=device)
+        return torch.linspace(start_time, t_eps, steps + 1, device=device)
 
     def marginal_prob(self, x_0, t):
         """
@@ -256,7 +257,7 @@ class CIFAR10Diffusion_SDE(nn.Module):
         return loss
     
     @torch.no_grad()
-    def sampling(self, n_samples, device="cuda", probability_flow=False, pf_steps=None, pf_schedule="linear", pf_solver="heun", pf_rtol=1e-4, pf_atol=1e-5):
+    def sampling(self, n_samples, device="cuda", probability_flow=False, pf_steps=None, pf_schedule="linear", pf_solver="heun", pf_rtol=1e-4, pf_atol=1e-5, tweedie=True):
         """
         Generate samples using Euler-Maruyama solver for the reverse-time SDE
         EXACTLY like MNIST implementation
@@ -310,24 +311,40 @@ class CIFAR10Diffusion_SDE(nn.Module):
 
                 # Heun update (average of drifts)
                 x_t = x_t - 0.5 * (drift_curr + drift_next) * dt
+
+            if tweedie:
+                t_last = time_grid[-1].item()
+                t_last_tensor = torch.full((n_samples,), t_last, device=x_t.device)
+                score_last = self.model(x_t, self._normalize_time(t_last_tensor))
+                a_last = math.exp(-self.k * t_last)
+                std2_last = (self.Tp / self.k) * (1.0 - math.exp(-2.0 * self.k * t_last))
+                x_t = (x_t + std2_last * score_last) / a_last
         else:
             noise_scale = math.sqrt(2 * self.Tp * self.dt)
-            for i in tqdm(range(self.timesteps-1, -1, -1), desc="Sampling"):
+            stop = 1 if tweedie else 0
+            for i in tqdm(range(self.timesteps-1, stop-1, -1), desc="Sampling"):
                 t = torch.full((n_samples,), i * self.dt, device=device)
                 score = self.model(x_t, self._normalize_time(t))
 
                 drift = -self.k * x_t - 2 * self.Tp * score
                 x_t = x_t - drift * self.dt
 
-                # Add noise for all steps except the final one (i=0)
-                if i > 0:
+                if i > stop:
                     x_t = x_t + noise_scale * torch.randn_like(x_t)
-        
+
+            if tweedie:
+                t_last = self.dt
+                t_last_tensor = torch.full((n_samples,), t_last, device=x_t.device)
+                score_last = self.model(x_t, self._normalize_time(t_last_tensor))
+                a_last = math.exp(-self.k * t_last)
+                std2_last = (self.Tp / self.k) * (1.0 - math.exp(-2.0 * self.k * t_last))
+                x_t = (x_t + std2_last * score_last) / a_last
+
         # Scale to [0, 1] range
         x_t = x_t.clip(-1, 1)
         x_t = (x_t + 1.) / 2.
         return x_t
-    
+
     @torch.no_grad()
     def sampling_from_intermediate(self, x_t, t_start, device="cuda", probability_flow=False, pf_steps=None, pf_schedule="linear", pf_solver="heun", pf_rtol=1e-4, pf_atol=1e-5):
         """
@@ -460,8 +477,10 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
             steps = self.timesteps
         steps = max(1, steps)
 
+        t_eps = 1e-3  # match training minimum time; avoid t=0 where model is untrained
+
         if schedule == "log" and steps > 1:
-            min_time = max(self.dt, 1e-4)
+            min_time = max(self.dt, t_eps)
             if start_time <= min_time:
                 schedule = "linear"
             else:
@@ -471,10 +490,9 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
                     + idx * torch.log(torch.tensor(start_time / min_time, device=device))
                 )
                 times = torch.flip(asc, dims=[0])
-                times[-1] = 0.0
                 return times
 
-        return torch.linspace(start_time, 0.0, steps + 1, device=device)
+        return torch.linspace(start_time, t_eps, steps + 1, device=device)
 
     def generate_eta0(self, batch_size, device=None):
         """Generate eta_0 for all 3 RGB channels - EXACTLY like MNIST"""
@@ -796,32 +814,30 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
                 model_input = x_eta.clone()
                 model_input[:, [1,3,5]] = model_input[:, [1,3,5]] / scale
                 model_output = self.model(model_input, self._normalize_time(t_tensor))
-                
-                # Determine if this is the final step (t=0)
+
                 is_final_step = (t == 0)
-                
-                # Update each channel independently using original active sampling
+
                 for channel in range(3):
-                    rgb_idx = channel * 2      # 0, 2, 4
-                    eta_idx = channel * 2 + 1  # 1, 3, 5
-                    
+                    rgb_idx = channel * 2
+                    eta_idx = channel * 2 + 1
+
                     rgb = x_eta[:, rgb_idx:rgb_idx+1]
                     eta = x_eta[:, eta_idx:eta_idx+1]
                     F_rgb = model_output[:, rgb_idx:rgb_idx+1]
                     F_eta = model_output[:, eta_idx:eta_idx+1]
-                    
+
                     rgb = rgb + dt_tensor * (self.k * rgb - eta) + force_coeff_rgb * F_rgb * dt_tensor
                     if not is_final_step:
                         rgb = rgb + noise_scale_rgb * torch.randn_like(rgb)
-                    
+
                     eta = eta + (dt_tensor * eta / tau_tensor) + \
                           force_coeff_eta * F_eta * dt_tensor
                     if not is_final_step:
                         eta = eta + noise_scale_eta * torch.randn_like(eta)
-                    
+
                     x_eta[:, rgb_idx:rgb_idx+1] = rgb
                     x_eta[:, eta_idx:eta_idx+1] = eta
-        
+
         # Extract final RGB channels
         final_rgb = x_eta[:, [0,2,4]]  # R, G, B channels
         final_eta = x_eta[:, [1,3,5]]  # η_r, η_g, η_b channels

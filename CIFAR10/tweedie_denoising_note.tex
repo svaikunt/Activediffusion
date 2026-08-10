@@ -1,0 +1,125 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb}
+\usepackage[margin=1.2in]{geometry}
+\usepackage{hyperref}
+
+\title{Tweedie Denoising Step for Diffusion Sampling\\(PF-ODE and Full SDE)}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{The Problem: Grainy Samples}
+
+The forward SDE for the passive model is the OU process
+\begin{equation}
+dx = -kx\,dt + \sqrt{2T_p}\,dW, \qquad t \in [0, T],
+\end{equation}
+with marginal distribution $p_t(x_t \mid x_0) = \mathcal{N}(\mu_t, \sigma_t^2)$ where
+\begin{equation}
+\mu_t = e^{-kt} x_0, \qquad \sigma_t^2 = \frac{T_p}{k}(1 - e^{-2kt}).
+\end{equation}
+The score is trained with a minimum time $t_{\min} = 10^{-3}$ (i.e.\ $t$ is sampled uniformly
+on $[t_{\min}, T]$), so the model has \emph{never seen} $t = 0$ during training.
+
+Both samplers integrate backwards from $t = T$ toward $t = 0$ and call the score network
+at each step.  The last step reaches $t = 0$, which is out of the training distribution,
+so the model returns a garbage score that corrupts the final sample.
+
+\paragraph{PF-ODE (Heun integrator).}
+The time grid ends at $t_{\mathrm{next}} = 0$.
+The Heun corrector evaluates the score at both $t_{\mathrm{curr}}$ and $t_{\mathrm{next}} = 0$,
+so the final update is polluted.
+
+\paragraph{Full SDE (Euler--Maruyama).}
+The discrete time grid is $t_i = i\cdot\Delta t$ for $i = N-1, \ldots, 0$.
+At the last step $i = 0$, $t = 0$: the model is called out of distribution,
+the resulting drift corrupts $x_{\Delta t}$, and no noise is added to partially mask it.
+
+\section{The Fix: Stop at $t_{\min}$ and Apply Tweedie}
+
+\paragraph{Step 1 (PF-ODE).} Change the time grid to end at $t_{\min} = 10^{-3}$
+instead of $t = 0$, so the last Heun corrector evaluation stays within the training range.
+
+\paragraph{Step 1 (SDE).} Change the Euler loop to stop at $i = 1$ (i.e.\ $t = \Delta t$)
+instead of $i = 0$ ($t = 0$), so the model is never called at $t = 0$.
+
+\paragraph{Step 2 (both).} After the loop stops at $x_{t_{\min}}$,
+apply one \emph{Tweedie denoising step} to obtain a clean estimate of $x_0$.
+
+\subsection{Tweedie's Formula}
+
+For a Gaussian perturbation kernel $p(x_t \mid x_0) = \mathcal{N}(\mu_t, \sigma_t^2)$,
+Tweedie's identity gives the posterior mean:
+\begin{equation}
+\hat{x}_0 \;=\; \mathbb{E}[x_0 \mid x_t]
+\;=\; \frac{x_t + \sigma_t^2\,\nabla_x \log p_t(x_t)}{e^{-kt}}.
+\label{eq:tweedie}
+\end{equation}
+At $t = t_{\min}$:
+\begin{equation}
+a \;=\; e^{-k\,t_{\min}}, \qquad
+\sigma^2 \;=\; \frac{T_p}{k}\bigl(1 - e^{-2k\,t_{\min}}\bigr),
+\end{equation}
+and one forward pass of the score network at $(x_{t_{\min}},\, t_{\min})$ gives
+$s_\theta \approx \nabla_x \log p_{t_{\min}}(x_{t_{\min}})$.
+The denoised output is then
+\begin{equation}
+\hat{x}_0 = \frac{x_{t_{\min}} + \sigma^2\, s_\theta(x_{t_{\min}},\, t_{\min})}{a}.
+\end{equation}
+This requires \emph{one extra NFE} (network function evaluation) but completely
+removes the residual noise at $t_{\min}$.
+
+\section{Why It Works}
+
+Because the forward process is Gaussian, $\hat{x}_0$ in \eqref{eq:tweedie}
+is the \emph{minimum mean-squared-error} (MMSE) estimator of $x_0$ given $x_t$.
+Even if the score is only approximately correct, the estimator degrades gracefully:
+any error in $s_\theta$ translates linearly into an error in $\hat{x}_0$.
+
+At $t_{\min} = 10^{-3}$ with typical parameters $k=4$, $T_p = 6.4$:
+\[
+\sigma = \sqrt{\frac{6.4}{4}(1 - e^{-0.008})} \approx 0.11.
+\]
+Without the Tweedie step, $x_{t_{\min}}$ still carries noise of standard deviation
+$\approx 0.11$ (roughly 8\% of the image range), which is perceptible as graininess.
+The Tweedie step removes this in a single pass.
+
+\section{Connection to CLD-SGM}
+
+This is exactly the \texttt{denoising = true} flag in the CLD-SGM codebase
+(Dockhorn et al., ICLR 2022).  Their \texttt{sampling.py} applies the same step
+after every ODE and EM sampler:
+\begin{verbatim}
+  if config.denoising:
+      u = denoising_fn(model, u, 1. - eps)   # ODE sampler
+      _, u = step_fn(model, u, 1.-eps, eps)  # EM sampler
+\end{verbatim}
+where the second return value of \texttt{step\_fn} is the conditional mean $\hat{x}_0$
+(the Tweedie estimate), not the noisy sample.
+
+\section{Active Model}
+
+For the active model with state $(x_t, \eta_t)$, the analogous Tweedie step
+is applied to the $x$ channels only (since $\eta$ is discarded at the end):
+\begin{equation}
+\hat{x}_0 = \frac{x_{t_{\min}} + M_{11}(t_{\min})\,F_x(x_{t_{\min}}, \eta_{t_{\min}},\, t_{\min})}{e^{-k\,t_{\min}}},
+\end{equation}
+where $M_{11}(t)$ is the $(x,x)$ element of the joint covariance matrix and
+$F_x$ is the network's $x$-score output.
+This is exact for the marginal $x$-score in the limit $\tau \to 0$,
+and approximate for finite $\tau$.
+
+\begin{thebibliography}{1}
+\bibitem{dockhorn2022cld}
+T.~Dockhorn, A.~Vahdat, and K.~Kreis,
+\textit{Score-Based Generative Modeling with Critically-Damped Langevin Diffusion},
+ICLR 2022.
+\bibitem{song2021sde}
+Y.~Song, J.~Sohl-Dickstein, D.~P. Kingma, A.~Kumar, S.~Ermon, and B.~Poole,
+\textit{Score-Based Generative Modeling through Stochastic Differential Equations},
+ICLR 2021.
+\end{thebibliography}
+
+\end{document}
