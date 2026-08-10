@@ -12,6 +12,7 @@ Usage:
 """
 import argparse
 import glob
+import math
 import os
 from typing import Optional
 
@@ -60,7 +61,8 @@ def parse_args():
     parser.add_argument("--num_samples", type=int, default=50000, help="Total number of images to generate")
     parser.add_argument("--batch_size", type=int, default=256, help="Generation batch size PER GPU")
     parser.add_argument("--output_dir", type=str, default="fid_samples", help="Where to save PNG files")
-    parser.add_argument("--grid_out", type=str, default="", help="Optional path to save a 10x10 grid")
+    parser.add_argument("--grid_out", type=str, default="", help="Optional path to save a grid image for visual inspection")
+    parser.add_argument("--grid_count", type=int, default=100, help="Number of images in the grid (laid out as a near-square panel)")
     parser.add_argument("--grid_labels", type=str, default="", help="TXT file with 100 labels (one per line)")
     parser.add_argument("--probability_flow", action="store_true", help="Use probability-flow ODE sampler")
     parser.add_argument("--pf_steps", type=int, default=0, help="Number of ODE steps for probability-flow sampling")
@@ -72,7 +74,8 @@ def parse_args():
         help="Time discretization schedule for probability-flow sampling",
     )
     parser.add_argument("--pf_solver", type=str, default="heun", choices=["heun", "rk45"], help="PF-ODE solver (heun fixed-step or rk45 adaptive)")
-    parser.add_argument("--no_tweedie", action="store_true", help="Disable Tweedie denoising at final step (passive only)")
+    parser.add_argument("--no_tweedie", action="store_true", help="Disable Tweedie denoising at final step (active and passive; not applied with --pf_solver rk45)")
+    parser.add_argument("--sscs", action="store_true", help="Use the symmetric-splitting (SSCS-style) stochastic sampler instead of Euler-Maruyama (active model only, ignored with --probability_flow)")
     return parser.parse_args()
 
 
@@ -228,6 +231,8 @@ def generate_samples(model, args, rank, world_size, is_main):
             print(f"PF steps: {args.pf_steps if args.pf_steps > 0 else 'default'}")
             print(f"PF schedule: {args.pf_schedule}")
             print(f"PF solver: {args.pf_solver}")
+        elif args.active:
+            print(f"Stochastic sampler: {'SSCS (exact-linear split)' if args.sscs else 'Euler-Maruyama'}")
         print(f"{'='*60}\n")
     
     # Generate samples
@@ -247,11 +252,14 @@ def generate_samples(model, args, rank, world_size, is_main):
     while total < my_num_samples:
         current_batch = min(args.batch_size, my_num_samples - total)
         
-        if args.active:
+        if args.active and args.sscs and not args.probability_flow:
+            images, _ = model.sampling_sscs(current_batch, device=device, tweedie=not args.no_tweedie)
+        elif args.active:
             images, _ = model.sampling(
                 current_batch,
                 device=device,
                 probability_flow=args.probability_flow,
+                tweedie=not args.no_tweedie,
                 **pf_kwargs,
             )
         else:
@@ -286,18 +294,19 @@ def generate_samples(model, args, rank, world_size, is_main):
     if is_main and args.grid_out:
         print("\nCreating sample grid...")
         image_paths = sorted(glob.glob(os.path.join(args.output_dir, "*.png")))
-        if len(image_paths) < 100:
-            print(f"Warning: Need at least 100 samples for grid, found {len(image_paths)}")
+        if len(image_paths) < args.grid_count:
+            print(f"Warning: Need at least {args.grid_count} samples for grid, found {len(image_paths)}")
         else:
-            selected = image_paths[:100]
+            selected = image_paths[:args.grid_count]
             tensors = []
             for path in selected:
                 img = Image.open(path).convert("RGB")
                 tensors.append(torch.from_numpy(np.array(img)).permute(2, 0, 1).float() / 255.0)
             grid_images = torch.stack(tensors, dim=0)
-            grid = make_grid(grid_images, nrow=10, normalize=False)
+            nrow = math.ceil(math.sqrt(args.grid_count))
+            grid = make_grid(grid_images, nrow=nrow, normalize=False)
             save_image(grid, args.grid_out)
-            print(f"Grid saved to {args.grid_out}")
+            print(f"Grid of {args.grid_count} images saved to {args.grid_out}")
 
 
 def main():

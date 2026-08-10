@@ -730,8 +730,141 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
 
         return drift
 
+    def _active_tweedie_correction(self, x_eta, t_eps, Tp_tensor, device):
+        """Explicit final-step correction at t_eps, replacing the RGB channels with
+        an estimate of x_0. Valid for tau >> t_eps (all channels change little over
+        the interval), derived and numerically validated against exact Gaussian
+        conditioning in-conversation: x0_hat = x_t - t_eps*eta_t + 2*Tp*t_eps*F_x.
+        Costs one extra network evaluation, matching the passive model's Tweedie step."""
+        n_samples = x_eta.shape[0]
+        scale = self.eta_scale_tensor.view(1, 1, 1, 1).to(device)
+        t_tensor = torch.full((n_samples,), t_eps, device=device)
+        model_input = x_eta.clone()
+        model_input[:, [1, 3, 5]] = model_input[:, [1, 3, 5]] / scale
+        model_output = self.model(model_input, self._normalize_time(t_tensor))
+
+        x_t = x_eta[:, [0, 2, 4]]
+        eta_t = x_eta[:, [1, 3, 5]]
+        F_x = model_output[:, [0, 2, 4]]
+
+        x0_hat = x_t - t_eps * eta_t + 2.0 * Tp_tensor * t_eps * F_x
+
+        corrected = x_eta.clone()
+        corrected[:, [0, 2, 4]] = x0_hat
+        return corrected
+
+    def _score_force(self, model_output, Tp_tensor, Ta_tensor, tau_tensor):
+        """Score-network force term only (the nonlinear 'N' part of the split);
+        excludes the linear (kx-eta, eta/tau) drift, which the exact half-step handles."""
+        force = torch.zeros_like(model_output)
+        force[:, [0, 2, 4]] = 2 * Tp_tensor * model_output[:, [0, 2, 4]]
+        force[:, [1, 3, 5]] = (2 * Ta_tensor / (tau_tensor * tau_tensor)) * model_output[:, [1, 3, 5]]
+        return force
+
+    def _reverse_transition_mean(self, x0, eta0, s):
+        """Exact mean of the reverse-time linear (L) flow over an interval of length s.
+        See active_sscs_sampler_note.tex, Eq. 6."""
+        k = self.k
+        tau = self.tau
+        e1 = math.exp(k * s)
+        e2 = math.exp(s / tau)
+        delta = k - 1.0 / tau
+        mean_x = e1 * x0 + ((e2 - e1) / delta) * eta0
+        mean_eta = e2 * eta0
+        return mean_x, mean_eta
+
+    def _reverse_transition_covariance(self, s, batch_size, device):
+        """Exact noise covariance of the reverse-time linear (L) flow over an interval
+        of length s, shape [batch_size, 2, 2]. See active_sscs_sampler_note.tex, Eqs. 7-9."""
+        k = self.k
+        tau = self.tau
+        q1 = 2.0 * self.Tp
+        q2 = 2.0 * self.Ta / (tau * tau)
+        delta = k - 1.0 / tau
+        mu = k + 1.0 / tau
+
+        e1 = math.exp(k * s)
+        e2 = math.exp(s / tau)
+
+        sigma_etaeta = (self.Ta / tau) * (e2 * e2 - 1.0)
+        sigma_xeta = (q2 / delta) * ((tau / 2.0) * (e2 * e2 - 1.0) - (e1 * e2 - 1.0) / mu)
+        sigma_xx = (q1 * (e1 * e1 - 1.0)) / (2.0 * k) + (q2 / (delta * delta)) * (
+            (tau / 2.0) * (e2 * e2 - 1.0) - 2.0 * (e1 * e2 - 1.0) / mu + (e1 * e1 - 1.0) / (2.0 * k)
+        )
+
+        cov = torch.tensor(
+            [[sigma_xx, sigma_xeta], [sigma_xeta, sigma_etaeta]], device=device, dtype=torch.float32
+        )
+        return cov.unsqueeze(0).expand(batch_size, 2, 2).contiguous()
+
+    def _analytic_half_step(self, x_eta, s, add_noise=True):
+        """Exact propagation of the reverse-time linear (L) part over an interval of
+        length s: (x, eta) -> exact OU mean, plus exact covariance noise if add_noise."""
+        batch_size = x_eta.shape[0]
+        device = x_eta.device
+
+        rgb = x_eta[:, [0, 2, 4]]
+        eta = x_eta[:, [1, 3, 5]]
+        mean_rgb, mean_eta = self._reverse_transition_mean(rgb, eta, s)
+
+        mean_x_eta = torch.zeros_like(x_eta)
+        mean_x_eta[:, [0, 2, 4]] = mean_rgb
+        mean_x_eta[:, [1, 3, 5]] = mean_eta
+
+        if not add_noise:
+            return mean_x_eta
+
+        cov = self._reverse_transition_covariance(s, batch_size, device)
+        noise = self.generate_correlated_noise(cov, num_channels=3)
+        return mean_x_eta + noise
+
     @torch.no_grad()
-    def sampling(self, n_samples, device="cuda", probability_flow=False, pf_steps=None, pf_schedule="linear", pf_solver="heun", pf_rtol=1e-4, pf_atol=1e-5):
+    def sampling_sscs(self, n_samples, device="cuda", tweedie=True):
+        """Symmetric-splitting (SSCS-style) stochastic sampler for the active SDE.
+
+        Replaces plain Euler-Maruyama with: exact linear-OU half-step, one score-force
+        Euler step, exact linear-OU half-step. Same number of network evaluations per
+        step as the Euler-Maruyama `sampling()` path. See active_sscs_sampler_note.tex
+        for the derivation and error analysis (global order 1, same as EM, but with the
+        tau-dependent stiffness error of the linear part removed entirely).
+        """
+        base_cov = self.compute_covariance(self.T * torch.ones(n_samples, device=device))
+        x_eta = self.generate_correlated_noise(base_cov, num_channels=3)
+
+        Tp_tensor = torch.tensor(self.Tp, device=device)
+        Ta_tensor = torch.tensor(self.Ta, device=device)
+        tau_tensor = torch.tensor(self.tau, device=device)
+        half_dt = self.dt / 2.0
+        scale = self.eta_scale_tensor.view(1, 1, 1, 1).to(device)
+
+        stop = 1 if tweedie else 0
+        for t in tqdm(range(self.timesteps - 2, stop - 1, -1), desc="Sampling (SSCS)"):
+            t_tensor = (t * self.dt) * torch.ones((n_samples,), device=device)
+            is_final_step = (t == stop)
+
+            x_eta = self._analytic_half_step(x_eta, half_dt, add_noise=not is_final_step)
+
+            model_input = x_eta.clone()
+            model_input[:, [1, 3, 5]] = model_input[:, [1, 3, 5]] / scale
+            model_output = self.model(model_input, self._normalize_time(t_tensor))
+            force = self._score_force(model_output, Tp_tensor, Ta_tensor, tau_tensor)
+            x_eta = x_eta + force * self.dt
+
+            x_eta = self._analytic_half_step(x_eta, half_dt, add_noise=not is_final_step)
+
+        if tweedie:
+            x_eta = self._active_tweedie_correction(x_eta, self.dt, Tp_tensor, device)
+
+        final_rgb = x_eta[:, [0, 2, 4]]
+        final_eta = x_eta[:, [1, 3, 5]]
+
+        final_rgb = final_rgb.clip(-1, 1)
+        final_rgb = (final_rgb + 1.) / 2.
+
+        return final_rgb.detach(), final_eta.detach()
+
+    @torch.no_grad()
+    def sampling(self, n_samples, device="cuda", probability_flow=False, pf_steps=None, pf_schedule="linear", pf_solver="heun", pf_rtol=1e-4, pf_atol=1e-5, tweedie=True):
         """Generate samples - EXACTLY like MNIST but for RGB"""
         # Create initial shape for samples (6 channels: RGB + 3 eta)
         image_shape = (n_samples, 6, self.image_size, self.image_size)
@@ -806,8 +939,12 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
 
                 # Heun update (average of drifts)
                 x_eta = x_eta + 0.5 * (drift_curr + drift_next) * dt
+
+            if tweedie:
+                x_eta = self._active_tweedie_correction(x_eta, time_grid[-1].item(), Tp_tensor, device)
         else:
-            for t in tqdm(range(self.timesteps - 2, -1, -1), desc="Sampling"):
+            stop = 1 if tweedie else 0
+            for t in tqdm(range(self.timesteps - 2, stop - 1, -1), desc="Sampling"):
                 t_tensor = (t * self.dt) * torch.ones((n_samples,), device=device)
 
                 scale = self.eta_scale_tensor.view(1, 1, 1, 1).to(x_eta.device)
@@ -815,7 +952,7 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
                 model_input[:, [1,3,5]] = model_input[:, [1,3,5]] / scale
                 model_output = self.model(model_input, self._normalize_time(t_tensor))
 
-                is_final_step = (t == 0)
+                is_final_step = (t == stop)
 
                 for channel in range(3):
                     rgb_idx = channel * 2
@@ -837,6 +974,9 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
 
                     x_eta[:, rgb_idx:rgb_idx+1] = rgb
                     x_eta[:, eta_idx:eta_idx+1] = eta
+
+            if tweedie:
+                x_eta = self._active_tweedie_correction(x_eta, self.dt, Tp_tensor, device)
 
         # Extract final RGB channels
         final_rgb = x_eta[:, [0,2,4]]  # R, G, B channels

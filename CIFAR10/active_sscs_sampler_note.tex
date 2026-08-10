@@ -250,6 +250,59 @@ warm-start for the first step and some extra bookkeeping to cache scores
 across steps, but keeps the 1-NFE-per-step cost of the current sampler.
 \end{itemize}
 
+\section{Final-step correction: an explicit Tweedie estimate at $t_{\rm eps}$}
+
+Both active samplers above stop at $t_{\rm eps}=10^{-3}$ (PF-ODE) or $t=dt$
+(SDE/SSCS) rather than the untrained $t=0$, for the same reason documented in
+\texttt{tweedie\_denoising\_note.tex} for the passive model: the score network
+never saw $t\approx0$ during training. Stopping early avoids the
+out-of-distribution evaluation, but leaves the state sitting on the noisy
+marginal $p_{t_{\rm eps}}(x,\eta\mid x_0,\eta_0)$ rather than a clean estimate
+of $x_0$ — genuine residual spread, not sampler-injected noise.
+
+\subsection{Exact correction}
+
+Unlike the passive model, $\eta_0$ is also random (drawn from its own
+stationary prior, independent of the data $x_0$), so the relevant identity is
+a joint (not scalar) Tweedie/Miyasawa estimate. Writing $w=(x_0,\eta_0)^\top$,
+$F=\begin{pmatrix}a&b\\0&c\end{pmatrix}$ (the mean-map from \S2.1), and
+$\Sigma_{\rm cond}=M(t_{\rm eps})$ (the network's actual denoising-score-matching
+target covariance, from \texttt{compute\_covariance}), the general linear-Gaussian
+Tweedie identity $\nabla_z\log p_t(z) = -\Sigma_{\rm cond}^{-1}(z-F\bar w)$ gives,
+after inverting $F$ and keeping only the $x_0$ component:
+\begin{equation}
+\hat x_0 = \frac{1}{a}\left[(x_t + M_{11}F_x + M_{12}F_\eta)
+- \frac{b}{c}\left(\eta_t + M_{12}F_x + M_{22}F_\eta\right)\right].
+\label{eq:tweedie-active-exact}
+\end{equation}
+This is exact given exact scores, and was verified numerically against direct
+multivariate Gaussian conditioning (synthetic Gaussian $x_0$ prior, so a
+ground-truth posterior mean is computable independently) — the formula
+reproduced the ground truth to full floating-point precision.
+
+\subsection{Explicit form when $\tau \gg t_{\rm eps}$ and $T_p \ll 1$}
+
+Both hold for every configuration used in this codebase ($T_p=10^{-3}$,
+$\tau\in\{0.25,0.45\}$, $t_{\rm eps}=10^{-3}$). Expanding
+\eqref{eq:tweedie-active-exact} to leading order in $t_{\rm eps}$
+($a\approx1$, $c\approx1$, $b\approx t_{\rm eps}$, $M_{12}=O(t_{\rm eps}^2)$,
+$M_{11}\approx2T_pt_{\rm eps}$):
+\begin{equation}
+\hat x_0 \approx x_t - t_{\rm eps}\,\eta_t + 2T_p\,t_{\rm eps}\,F_x + O(t_{\rm eps}^2).
+\label{eq:tweedie-active-explicit}
+\end{equation}
+Checked numerically against \eqref{eq:tweedie-active-exact} at the true
+parameter values: relative error $\sim0.1\%$, consistent with the $O(t_{\rm
+eps}^2)$ truncation. The $2T_pt_{\rm eps}F_x$ term costs nothing extra to keep
+(the network is already evaluated once more at $t_{\rm eps}$ for this
+correction, same as the passive model's Tweedie step), so
+\eqref{eq:tweedie-active-explicit} — not a further-truncated
+$\hat x_0\approx x_t-t_{\rm eps}\eta_t$ — is what's implemented in
+\texttt{model\_cifar10\_sde\_DDPM.py}'s \texttt{\_active\_tweedie\_correction},
+called from the PF-ODE and SDE branches of \texttt{sampling()} and from
+\texttt{sampling\_sscs()}, gated by a \texttt{tweedie=True} flag matching the
+passive model's convention.
+
 \section{Connection to CLD-SGM}
 
 This is the same construction as the Symmetric Splitting CLD Sampler (SSCS)
