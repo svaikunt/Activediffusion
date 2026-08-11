@@ -320,20 +320,30 @@ class CIFAR10Diffusion_SDE(nn.Module):
                 std2_last = (self.Tp / self.k) * (1.0 - math.exp(-2.0 * self.k * t_last))
                 x_t = (x_t + std2_last * score_last) / a_last
         else:
-            noise_scale = math.sqrt(2 * self.Tp * self.dt)
-            stop = 1 if tweedie else 0
-            for i in tqdm(range(self.timesteps-1, stop-1, -1), desc="Sampling"):
-                t = torch.full((n_samples,), i * self.dt, device=device)
-                score = self.model(x_t, self._normalize_time(t))
+            # SDE (Euler-Maruyama) sampler with a configurable step count/schedule
+            # (reuses the same pf_steps/pf_schedule knobs as the PF-ODE branch; at the
+            # default pf_steps=None this is effectively the old fixed-self.dt loop,
+            # off by a single negligible step at the t=T boundary).
+            time_grid = self._build_pf_time_grid(pf_steps, pf_schedule, x_t.device)
+            n_intervals = len(time_grid) - 1
+            for idx in tqdm(range(n_intervals), desc="Sampling"):
+                t_curr = time_grid[idx]
+                t_next = time_grid[idx + 1]
+                dt = (t_curr - t_next).clamp(min=1e-6)
+                is_final_step = tweedie and (idx == n_intervals - 1)
+
+                t_tensor = torch.full((n_samples,), t_curr.item(), device=device)
+                score = self.model(x_t, self._normalize_time(t_tensor))
 
                 drift = -self.k * x_t - 2 * self.Tp * score
-                x_t = x_t - drift * self.dt
+                x_t = x_t - drift * dt
 
-                if i > stop:
+                if not is_final_step:
+                    noise_scale = math.sqrt(2 * self.Tp * dt.item())
                     x_t = x_t + noise_scale * torch.randn_like(x_t)
 
             if tweedie:
-                t_last = self.dt
+                t_last = time_grid[-1].item()
                 t_last_tensor = torch.full((n_samples,), t_last, device=x_t.device)
                 score_last = self.model(x_t, self._normalize_time(t_last_tensor))
                 a_last = math.exp(-self.k * t_last)
@@ -819,7 +829,7 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
         return mean_x_eta + noise
 
     @torch.no_grad()
-    def sampling_sscs(self, n_samples, device="cuda", tweedie=True):
+    def sampling_sscs(self, n_samples, device="cuda", tweedie=True, pf_steps=None, pf_schedule="linear"):
         """Symmetric-splitting (SSCS-style) stochastic sampler for the active SDE.
 
         Replaces plain Euler-Maruyama with: exact linear-OU half-step, one score-force
@@ -827,6 +837,13 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
         step as the Euler-Maruyama `sampling()` path. See active_sscs_sampler_note.tex
         for the derivation and error analysis (global order 1, same as EM, but with the
         tau-dependent stiffness error of the linear part removed entirely).
+
+        `pf_steps`/`pf_schedule` decouple the step count from `self.timesteps` (reusing
+        the same time-grid builder as the PF-ODE sampler; `pf_steps=None` reproduces the
+        old fixed-`self.dt` behavior). The Tweedie jump always lands at the fixed
+        `t_eps` the grid builder uses, not at a step-count-dependent point, so unlike
+        the plain SDE branch of `sampling()`, fewer steps here does not degrade the
+        final Tweedie correction.
         """
         base_cov = self.compute_covariance(self.T * torch.ones(n_samples, device=device))
         x_eta = self.generate_correlated_noise(base_cov, num_channels=3)
@@ -834,26 +851,30 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
         Tp_tensor = torch.tensor(self.Tp, device=device)
         Ta_tensor = torch.tensor(self.Ta, device=device)
         tau_tensor = torch.tensor(self.tau, device=device)
-        half_dt = self.dt / 2.0
         scale = self.eta_scale_tensor.view(1, 1, 1, 1).to(device)
 
-        stop = 1 if tweedie else 0
-        for t in tqdm(range(self.timesteps - 2, stop - 1, -1), desc="Sampling (SSCS)"):
-            t_tensor = (t * self.dt) * torch.ones((n_samples,), device=device)
-            is_final_step = (t == stop)
+        time_grid = self._build_pf_time_grid(pf_steps, pf_schedule, device)
+        n_intervals = len(time_grid) - 1
+        for idx in tqdm(range(n_intervals), desc="Sampling (SSCS)"):
+            t_curr = time_grid[idx]
+            t_next = time_grid[idx + 1]
+            dt = (t_curr - t_next).clamp(min=1e-6)
+            half_dt = dt / 2.0
+            is_final_step = tweedie and (idx == n_intervals - 1)
 
             x_eta = self._analytic_half_step(x_eta, half_dt, add_noise=not is_final_step)
 
+            t_tensor = torch.full((n_samples,), t_curr.item(), device=device)
             model_input = x_eta.clone()
             model_input[:, [1, 3, 5]] = model_input[:, [1, 3, 5]] / scale
             model_output = self.model(model_input, self._normalize_time(t_tensor))
             force = self._score_force(model_output, Tp_tensor, Ta_tensor, tau_tensor)
-            x_eta = x_eta + force * self.dt
+            x_eta = x_eta + force * dt
 
             x_eta = self._analytic_half_step(x_eta, half_dt, add_noise=not is_final_step)
 
         if tweedie:
-            x_eta = self._active_tweedie_correction(x_eta, self.dt, Tp_tensor, device)
+            x_eta = self._active_tweedie_correction(x_eta, time_grid[-1].item(), Tp_tensor, device)
 
         final_rgb = x_eta[:, [0, 2, 4]]
         final_eta = x_eta[:, [1, 3, 5]]
@@ -879,10 +900,6 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
         Tp_tensor = torch.tensor(self.Tp, device=device)
         Ta_tensor = torch.tensor(self.Ta, device=device)
         tau_tensor = torch.tensor(self.tau, device=device)
-        dt_tensor = torch.tensor(self.dt, device=device)
-        
-        noise_scale_rgb = torch.sqrt(2 * Tp_tensor * dt_tensor)
-        noise_scale_eta = (1 / tau_tensor) * torch.sqrt(2 * Ta_tensor * dt_tensor)
         force_coeff_rgb = 2 * Tp_tensor
         force_coeff_eta = 2 * Ta_tensor / (tau_tensor * tau_tensor)
 
@@ -943,16 +960,28 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
             if tweedie:
                 x_eta = self._active_tweedie_correction(x_eta, time_grid[-1].item(), Tp_tensor, device)
         else:
-            stop = 1 if tweedie else 0
-            for t in tqdm(range(self.timesteps - 2, stop - 1, -1), desc="Sampling"):
-                t_tensor = (t * self.dt) * torch.ones((n_samples,), device=device)
+            # SDE (Euler-Maruyama) sampler with a configurable step count/schedule
+            # (reuses the same pf_steps/pf_schedule knobs as the PF-ODE branch; at the
+            # default pf_steps=None this is effectively the old fixed-self.dt loop,
+            # off by a single negligible step at the t=T boundary).
+            time_grid = self._build_pf_time_grid(pf_steps, pf_schedule, x_eta.device)
+            n_intervals = len(time_grid) - 1
+            for idx in tqdm(range(n_intervals), desc="Sampling"):
+                t_curr = time_grid[idx]
+                t_next = time_grid[idx + 1]
+                dt = (t_curr - t_next).clamp(min=1e-6)
+                dt_tensor = dt.to(device)
+                noise_scale_rgb = torch.sqrt(2 * Tp_tensor * dt_tensor)
+                noise_scale_eta = (1 / tau_tensor) * torch.sqrt(2 * Ta_tensor * dt_tensor)
+
+                t_tensor = torch.full((n_samples,), t_curr.item(), device=device)
 
                 scale = self.eta_scale_tensor.view(1, 1, 1, 1).to(x_eta.device)
                 model_input = x_eta.clone()
                 model_input[:, [1,3,5]] = model_input[:, [1,3,5]] / scale
                 model_output = self.model(model_input, self._normalize_time(t_tensor))
 
-                is_final_step = (t == stop)
+                is_final_step = tweedie and (idx == n_intervals - 1)
 
                 for channel in range(3):
                     rgb_idx = channel * 2
@@ -976,7 +1005,7 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
                     x_eta[:, eta_idx:eta_idx+1] = eta
 
             if tweedie:
-                x_eta = self._active_tweedie_correction(x_eta, self.dt, Tp_tensor, device)
+                x_eta = self._active_tweedie_correction(x_eta, time_grid[-1].item(), Tp_tensor, device)
 
         # Extract final RGB channels
         final_rgb = x_eta[:, [0,2,4]]  # R, G, B channels

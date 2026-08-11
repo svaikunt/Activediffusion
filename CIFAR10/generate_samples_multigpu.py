@@ -239,21 +239,26 @@ def generate_samples(model, args, rank, world_size, is_main):
     total = 0
     sample_idx = rank * samples_per_gpu  # Each GPU has its own index range
     
-    pf_kwargs = {}
+    # pf_steps/pf_schedule now control the step count/schedule for every sampler
+    # (SDE and SSCS included, not just PF-ODE) -- see model_cifar10_sde_DDPM.py.
+    pf_steps_val = args.pf_steps if args.pf_steps > 0 else None
+    pf_kwargs = {"pf_steps": pf_steps_val, "pf_schedule": args.pf_schedule}
     if args.probability_flow:
-        pf_kwargs = {
-            "pf_steps": args.pf_steps if args.pf_steps > 0 else None,
-            "pf_schedule": args.pf_schedule,
-            "pf_solver": args.pf_solver,
-        }
+        pf_kwargs["pf_solver"] = args.pf_solver
         if not _sampling_supports_pf_solver(model):
             pf_kwargs.pop("pf_solver", None)
-    
+
     while total < my_num_samples:
         current_batch = min(args.batch_size, my_num_samples - total)
-        
+
         if args.active and args.sscs and not args.probability_flow:
-            images, _ = model.sampling_sscs(current_batch, device=device, tweedie=not args.no_tweedie)
+            images, _ = model.sampling_sscs(
+                current_batch,
+                device=device,
+                tweedie=not args.no_tweedie,
+                pf_steps=pf_steps_val,
+                pf_schedule=args.pf_schedule,
+            )
         elif args.active:
             images, _ = model.sampling(
                 current_batch,
