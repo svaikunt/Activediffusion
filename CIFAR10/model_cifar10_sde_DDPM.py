@@ -740,12 +740,15 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
 
         return drift
 
-    def _active_tweedie_correction(self, x_eta, t_eps, Tp_tensor, device):
-        """Explicit final-step correction at t_eps, replacing the RGB channels with
-        an estimate of x_0. Valid for tau >> t_eps (all channels change little over
-        the interval), derived and numerically validated against exact Gaussian
-        conditioning in-conversation: x0_hat = x_t - t_eps*eta_t + 2*Tp*t_eps*F_x.
-        Costs one extra network evaluation, matching the passive model's Tweedie step."""
+    def _active_tweedie_correction(self, x_eta, t_eps, device):
+        """Exact final-step correction at t_eps: multivariate Tweedie/Miyasawa estimate
+        of x_0 given the joint (x_t, eta_t) state, using the network's full (F_x, F_eta)
+        score output and the exact forward transition coefficients (a, b, c) and
+        covariance (M11, M12, M22) at t_eps -- not the small-t_eps linearization used
+        in an earlier draft (which dropped a same-order k*t_eps*x_t term; see
+        active_sscs_sampler_note.tex for the derivation and the numerical check that
+        exposed the missing term). Costs one extra network evaluation, matching the
+        passive model's Tweedie step; F_eta is free since it comes from the same call."""
         n_samples = x_eta.shape[0]
         scale = self.eta_scale_tensor.view(1, 1, 1, 1).to(device)
         t_tensor = torch.full((n_samples,), t_eps, device=device)
@@ -756,8 +759,22 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
         x_t = x_eta[:, [0, 2, 4]]
         eta_t = x_eta[:, [1, 3, 5]]
         F_x = model_output[:, [0, 2, 4]]
+        F_eta = model_output[:, [1, 3, 5]]
 
-        x0_hat = x_t - t_eps * eta_t + 2.0 * Tp_tensor * t_eps * F_x
+        k = self.k
+        tau = self.tau
+        a = math.exp(-k * t_eps)
+        c = math.exp(-t_eps / tau)
+        b = (c - a) / (k - 1.0 / tau)
+
+        cov = self.compute_covariance(t_tensor)
+        M11 = cov[:, 0, 0].view(-1, 1, 1, 1)
+        M12 = cov[:, 0, 1].view(-1, 1, 1, 1)
+        M22 = cov[:, 1, 1].view(-1, 1, 1, 1)
+
+        x0_hat = (1.0 / a) * (
+            (x_t + M11 * F_x + M12 * F_eta) - (b / c) * (eta_t + M12 * F_x + M22 * F_eta)
+        )
 
         corrected = x_eta.clone()
         corrected[:, [0, 2, 4]] = x0_hat
@@ -829,7 +846,7 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
         return mean_x_eta + noise
 
     @torch.no_grad()
-    def sampling_sscs(self, n_samples, device="cuda", tweedie=True, pf_steps=None, pf_schedule="linear"):
+    def sampling_sscs(self, n_samples, device="cuda", tweedie=True, pf_steps=None, pf_schedule="linear", score_time="midpoint"):
         """Symmetric-splitting (SSCS-style) stochastic sampler for the active SDE.
 
         Replaces plain Euler-Maruyama with: exact linear-OU half-step, one score-force
@@ -844,6 +861,14 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
         `t_eps` the grid builder uses, not at a step-count-dependent point, so unlike
         the plain SDE branch of `sampling()`, fewer steps here does not degrade the
         final Tweedie correction.
+
+        `score_time`: "midpoint" (default) scores the network at t_curr - half_dt,
+        matching the state's actual time after the first half-step. "start" reproduces
+        the older behavior (score at t_curr, stale by half_dt) for A/B comparison --
+        the staleness scales as dt/(4t) in relative force magnitude near t->0 (since
+        score magnitude ~ t^-1/2), so expect "start" vs "midpoint" to diverge most at
+        low step counts and converge at high step counts, not to explain a step-count-
+        invariant bias.
         """
         base_cov = self.compute_covariance(self.T * torch.ones(n_samples, device=device))
         x_eta = self.generate_correlated_noise(base_cov, num_channels=3)
@@ -864,7 +889,8 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
 
             x_eta = self._analytic_half_step(x_eta, half_dt, add_noise=not is_final_step)
 
-            t_tensor = torch.full((n_samples,), t_curr.item(), device=device)
+            t_score = (t_curr - half_dt) if score_time == "midpoint" else t_curr
+            t_tensor = torch.full((n_samples,), t_score.item(), device=device)
             model_input = x_eta.clone()
             model_input[:, [1, 3, 5]] = model_input[:, [1, 3, 5]] / scale
             model_output = self.model(model_input, self._normalize_time(t_tensor))
@@ -874,7 +900,7 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
             x_eta = self._analytic_half_step(x_eta, half_dt, add_noise=not is_final_step)
 
         if tweedie:
-            x_eta = self._active_tweedie_correction(x_eta, time_grid[-1].item(), Tp_tensor, device)
+            x_eta = self._active_tweedie_correction(x_eta, time_grid[-1].item(), device)
 
         final_rgb = x_eta[:, [0, 2, 4]]
         final_eta = x_eta[:, [1, 3, 5]]
@@ -958,7 +984,7 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
                 x_eta = x_eta + 0.5 * (drift_curr + drift_next) * dt
 
             if tweedie:
-                x_eta = self._active_tweedie_correction(x_eta, time_grid[-1].item(), Tp_tensor, device)
+                x_eta = self._active_tweedie_correction(x_eta, time_grid[-1].item(), device)
         else:
             # SDE (Euler-Maruyama) sampler with a configurable step count/schedule
             # (reuses the same pf_steps/pf_schedule knobs as the PF-ODE branch; at the
@@ -1005,7 +1031,7 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
                     x_eta[:, eta_idx:eta_idx+1] = eta
 
             if tweedie:
-                x_eta = self._active_tweedie_correction(x_eta, time_grid[-1].item(), Tp_tensor, device)
+                x_eta = self._active_tweedie_correction(x_eta, time_grid[-1].item(), device)
 
         # Extract final RGB channels
         final_rgb = x_eta[:, [0,2,4]]  # R, G, B channels

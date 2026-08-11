@@ -76,6 +76,7 @@ def parse_args():
     parser.add_argument("--pf_solver", type=str, default="heun", choices=["heun", "rk45"], help="PF-ODE solver (heun fixed-step or rk45 adaptive)")
     parser.add_argument("--no_tweedie", action="store_true", help="Disable Tweedie denoising at final step (active and passive; not applied with --pf_solver rk45)")
     parser.add_argument("--sscs", action="store_true", help="Use the symmetric-splitting (SSCS-style) stochastic sampler instead of Euler-Maruyama (active model only, ignored with --probability_flow)")
+    parser.add_argument("--score_time", type=str, default="midpoint", choices=["midpoint", "start"], help="SSCS only: score the network at the true midpoint (default, fixed) or the stale step-start time (old behavior, for A/B comparison)")
     return parser.parse_args()
 
 
@@ -258,6 +259,7 @@ def generate_samples(model, args, rank, world_size, is_main):
                 tweedie=not args.no_tweedie,
                 pf_steps=pf_steps_val,
                 pf_schedule=args.pf_schedule,
+                score_time=args.score_time,
             )
         elif args.active:
             images, _ = model.sampling(
