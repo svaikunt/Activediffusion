@@ -236,7 +236,7 @@ def generate_samples(model, args, rank, world_size, is_main):
             print(f"PF solver: {args.pf_solver}")
         elif args.active:
             print(f"Stochastic sampler: {'SSCS (' + args.splitting + ' split, score@' + args.score_time + ')' if args.sscs else 'Euler-Maruyama'}")
-            print(f"Schedule: {args.pf_schedule}   steps: {pf_steps_val if pf_steps_val else 'default (timesteps)'}   t_end: {args.t_end if args.t_end is not None else 1e-3}")
+            print(f"Schedule: {args.pf_schedule}   steps: {args.pf_steps if args.pf_steps > 0 else 'default (timesteps)'}   t_end: {args.t_end if args.t_end is not None else 1e-3}")
         print(f"{'='*60}\n")
     
     # Generate samples
