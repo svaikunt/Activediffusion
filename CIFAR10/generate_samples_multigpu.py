@@ -70,13 +70,15 @@ def parse_args():
         "--pf_schedule",
         type=str,
         default="linear",
-        choices=["linear", "log"],
-        help="Time discretization schedule for probability-flow sampling",
+        choices=["linear", "log", "quadratic"],
+        help="Time discretization schedule. 'quadratic' concentrates steps near the data end (CLD-SGM's QS); applies to PF-ODE, SDE and SSCS alike",
     )
     parser.add_argument("--pf_solver", type=str, default="heun", choices=["heun", "rk45"], help="PF-ODE solver (heun fixed-step or rk45 adaptive)")
     parser.add_argument("--no_tweedie", action="store_true", help="Disable Tweedie denoising at final step (active and passive; not applied with --pf_solver rk45)")
     parser.add_argument("--sscs", action="store_true", help="Use the symmetric-splitting (SSCS-style) stochastic sampler instead of Euler-Maruyama (active model only, ignored with --probability_flow)")
     parser.add_argument("--score_time", type=str, default="midpoint", choices=["midpoint", "start"], help="SSCS only: score the network at the true midpoint (default, fixed) or the stale step-start time (old behavior, for A/B comparison)")
+    parser.add_argument("--splitting", type=str, default="equilibrium", choices=["equilibrium", "naive"], help="SSCS only: 'equilibrium' absorbs the stationary score into the analytic flow (CLD's convention, strongly recommended); 'naive' is the old full-score split, kept for A/B")
+    parser.add_argument("--t_end", type=float, default=None, help="Stop the time grid here instead of 1e-3. Active model only; pass 0.0 to integrate straight to t=0 (Tweedie is then skipped)")
     return parser.parse_args()
 
 
@@ -233,7 +235,8 @@ def generate_samples(model, args, rank, world_size, is_main):
             print(f"PF schedule: {args.pf_schedule}")
             print(f"PF solver: {args.pf_solver}")
         elif args.active:
-            print(f"Stochastic sampler: {'SSCS (exact-linear split)' if args.sscs else 'Euler-Maruyama'}")
+            print(f"Stochastic sampler: {'SSCS (' + args.splitting + ' split, score@' + args.score_time + ')' if args.sscs else 'Euler-Maruyama'}")
+            print(f"Schedule: {args.pf_schedule}   steps: {pf_steps_val if pf_steps_val else 'default (timesteps)'}   t_end: {args.t_end if args.t_end is not None else 1e-3}")
         print(f"{'='*60}\n")
     
     # Generate samples
@@ -260,6 +263,8 @@ def generate_samples(model, args, rank, world_size, is_main):
                 pf_steps=pf_steps_val,
                 pf_schedule=args.pf_schedule,
                 score_time=args.score_time,
+                splitting=args.splitting,
+                t_end=args.t_end,
             )
         elif args.active:
             images, _ = model.sampling(
@@ -267,6 +272,7 @@ def generate_samples(model, args, rank, world_size, is_main):
                 device=device,
                 probability_flow=args.probability_flow,
                 tweedie=not args.no_tweedie,
+                t_end=args.t_end,
                 **pf_kwargs,
             )
         else:

@@ -206,6 +206,14 @@ class CIFAR10Diffusion_SDE(nn.Module):
 
         t_eps = 1e-3  # match training minimum time; avoid t=0 where model is untrained
 
+        if schedule == "quadratic" and steps > 1:
+            # Quadratic striding (CLD-SGM App. E.2.3): concentrate function evaluations
+            # near the data end, where the marginal is most complex. Their Tab. 9 shows
+            # SSCS 81.1 -> SSCS-QS 20.5 FID at 50 NFE.
+            idx = torch.linspace(0, 1, steps + 1, device=device)
+            asc = t_eps + (start_time - t_eps) * idx ** 2
+            return torch.flip(asc, dims=[0])
+
         if schedule == "log" and steps > 1:
             min_time = max(self.dt, t_eps)
             if start_time <= min_time:
@@ -497,6 +505,14 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
         steps = max(1, steps)
 
         t_eps = 1e-3 if t_end is None else float(t_end)
+
+        if schedule == "quadratic" and steps > 1:
+            # Quadratic striding (CLD-SGM App. E.2.3): concentrate function evaluations
+            # near the data end, where the marginal is most complex. Their Tab. 9 shows
+            # SSCS 81.1 -> SSCS-QS 20.5 FID at 50 NFE.
+            idx = torch.linspace(0, 1, steps + 1, device=device)
+            asc = t_eps + (start_time - t_eps) * idx ** 2
+            return torch.flip(asc, dims=[0])
 
         if schedule == "log" and steps > 1 and t_eps > 0:
             min_time = max(self.dt, t_eps)
