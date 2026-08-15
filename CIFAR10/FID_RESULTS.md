@@ -1023,6 +1023,31 @@ to ~1e-14 at τ = 0.15, 0.20, 0.40 and finite at τ = 0.25.
 Note that `diffusion_loss_active` is in the training path, so the τ=0.25 run would have
 died there even with `compute_covariance` alone fixed.
 
+**Verification at the critical point.** `_eq_transition` builds
+`E(h) = Σ∞ exp(Aᵀh) Σ∞⁻¹`, so the similarity transform has to survive the Jordan block
+too. Checked at h = 0.004, k = 4:
+
+| τ | eig₁ | eig₂ | max err vs {e^−kh, e^−h/τ} | ‖(E−λI)²‖ | C PSD |
+|---|---|---|---|---|---|
+| 0.10 | 0.960789439152 | 0.984127320055 | 3.3e-16 | 1.0e-02 | yes |
+| 0.15 | 0.973685749353 | 0.984127320055 | 1.1e-16 | 3.5e-03 | yes |
+| 0.20 | 0.980198673307 | 0.984127320055 | 1.4e-15 | 1.1e-03 | yes |
+| **0.25** | **0.984127320055** | **0.984127320055** | **2.2e-16** | **1.1e-16** | yes |
+| 0.40 | 0.984127320055 | 0.990049833749 | 1.3e-15 | 1.2e-03 | yes |
+
+Eigenvalues correct to machine precision everywhere. At τ=0.25 both collapse to e^−kh and
+`(E−λI)²` vanishes to 1.1e-16 — `E` is genuinely defective there rather than accidentally
+diagonalized by roundoff, and the O(10⁻³) residual at the other τ shows the test
+discriminates. Σ∞ itself is well-conditioned throughout (cond 66–80, det 10–52), so the
+`Σ∞⁻¹` in the transform amplifies nothing.
+
+**General rule for future extensions.** In a two-timescale linear SDE every transition
+coefficient is built from `e^{−kt}` and `e^{−t/τ}`; any that combines them with a
+*difference* of rates in the denominator degenerates at kτ=1. Stationary quantities are
+structurally safe — `_stationary_covariance` has `k + 1/τ` precisely because it is the
+t→∞ limit where the transients have cancelled. So: time-dependent and mixing both rates →
+check for Δ; stationary → probably fine.
+
 **Consequences.**
 
 - Any τ now works, including 0.25 and values near it, across forward kernels, the loss,
