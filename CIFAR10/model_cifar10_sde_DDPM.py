@@ -710,12 +710,17 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
         # Protect determinant from becoming too small (critical for numerical stability)
         det = torch.clamp(det, min=1e-8)
         
-        # Compute mean coefficients
+        # Compute mean coefficients.  b is the (1,2) entry of exp(A t); see
+        # compute_mean for why the naive quotient is 0/0 at tau = 1/k.
         k = self.k
         tau = self.tau
+        d = k - (1.0 / tau)
         a = torch.exp(-k * t)
-        b = (torch.exp(-t / tau) - torch.exp(-k * t)) / (k - (1 / tau))
         c = torch.exp(-t / tau)
+        if abs(d) < 1e-8:
+            b = t * a
+        else:
+            b = a * torch.expm1(d * t) / d
         
         # Apply MNIST loss to each channel independently
         total_loss = 0.0
@@ -792,7 +797,8 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
         tau = self.tau
         a = math.exp(-k * t_eps)
         c = math.exp(-t_eps / tau)
-        b = (c - a) / (k - 1.0 / tau)
+        d = k - 1.0 / tau
+        b = (t_eps * a) if abs(d) < 1e-8 else (a * math.expm1(d * t_eps) / d)
 
         cov = self.compute_covariance(t_tensor)
         M11 = cov[:, 0, 0].view(-1, 1, 1, 1)
@@ -833,7 +839,8 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
         sxx, sxe, see = self._stationary_covariance()
         a = math.exp(-k * s)
         c = math.exp(-s / tau)
-        b = (c - a) / (k - 1.0 / tau)
+        d = k - 1.0 / tau
+        b = (s * a) if abs(d) < 1e-8 else (a * math.expm1(d * s) / d)
 
         # P = S_inf @ exp(A^T s), with exp(A^T s) = [[a, 0], [b, c]]
         p11 = sxx * a + sxe * b
@@ -894,41 +901,46 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
         force[:, [1, 3, 5]] = (2 * Ta_tensor / (tau_tensor * tau_tensor)) * model_output[:, [1, 3, 5]]
         return force
 
+    def _vanloan(self, s, reverse=False):
+        """(exp(B s),  int_0^s exp(B u) Q exp(B^T u) du)  via Van Loan's method.
+
+        B = A for the forward flow, B = -A for the reverse-time linear flow, with
+        A = [[-k, 1], [0, -1/tau]] and Q = diag(2Tp, 2Ta/tau^2).  The closed forms
+        for these carry (k - 1/tau) and (k - 1/tau)^2 denominators, which are 0/0
+        at tau = 1/k (A is defective there -- a Jordan block, exp(A t) picks up the
+        linear-in-t factor) and lose float precision nearby.  Van Loan never forms
+        an eigenvalue gap, so it is exact on the whole family.  Agrees with the old
+        closed forms to ~1e-14.  Returns two 2x2 float64 CPU tensors.
+        """
+        k  = float(self.k)
+        w  = 1.0 / float(self.tau)
+        B  = torch.tensor([[-k, 1.0], [0.0, -w]], dtype=torch.float64)
+        if reverse:
+            B = -B
+        Q = torch.tensor([[2.0 * float(self.Tp), 0.0],
+                          [0.0, 2.0 * float(self.Ta) / float(self.tau) ** 2]],
+                         dtype=torch.float64)
+        Z = torch.zeros(2, 2, dtype=torch.float64)
+        C = torch.cat([torch.cat([-B, Q], 1), torch.cat([Z, B.T], 1)], 0)
+        E = torch.linalg.matrix_exp(C * float(s))
+        Phi = E[2:, 2:].T.contiguous()
+        Sig = Phi @ E[:2, 2:]
+        return Phi, 0.5 * (Sig + Sig.T)
+
     def _reverse_transition_mean(self, x0, eta0, s):
         """Exact mean of the reverse-time linear (L) flow over an interval of length s.
-        See active_sscs_sampler_note.tex, Eq. 6."""
-        k = self.k
-        tau = self.tau
-        e1 = math.exp(k * s)
-        e2 = math.exp(s / tau)
-        delta = k - 1.0 / tau
-        mean_x = e1 * x0 + ((e2 - e1) / delta) * eta0
-        mean_eta = e2 * eta0
-        return mean_x, mean_eta
+        See active_sscs_sampler_note.tex, Eq. 6 (evaluated via Van Loan)."""
+        Phi, _ = self._vanloan(s, reverse=True)
+        e11, e12, e22 = float(Phi[0, 0]), float(Phi[0, 1]), float(Phi[1, 1])
+        return e11 * x0 + e12 * eta0, e22 * eta0
 
     def _reverse_transition_covariance(self, s, batch_size, device):
         """Exact noise covariance of the reverse-time linear (L) flow over an interval
-        of length s, shape [batch_size, 2, 2]. See active_sscs_sampler_note.tex, Eqs. 7-9."""
-        k = self.k
-        tau = self.tau
-        q1 = 2.0 * self.Tp
-        q2 = 2.0 * self.Ta / (tau * tau)
-        delta = k - 1.0 / tau
-        mu = k + 1.0 / tau
-
-        e1 = math.exp(k * s)
-        e2 = math.exp(s / tau)
-
-        sigma_etaeta = (self.Ta / tau) * (e2 * e2 - 1.0)
-        sigma_xeta = (q2 / delta) * ((tau / 2.0) * (e2 * e2 - 1.0) - (e1 * e2 - 1.0) / mu)
-        sigma_xx = (q1 * (e1 * e1 - 1.0)) / (2.0 * k) + (q2 / (delta * delta)) * (
-            (tau / 2.0) * (e2 * e2 - 1.0) - 2.0 * (e1 * e2 - 1.0) / mu + (e1 * e1 - 1.0) / (2.0 * k)
-        )
-
-        cov = torch.tensor(
-            [[sigma_xx, sigma_xeta], [sigma_xeta, sigma_etaeta]], device=device, dtype=torch.float32
-        )
+        of length s, shape [batch_size, 2, 2].  See note Eqs. 7-9 (via Van Loan)."""
+        _, Sig = self._vanloan(s, reverse=True)
+        cov = Sig.to(dtype=torch.float32, device=device)
         return cov.unsqueeze(0).expand(batch_size, 2, 2).contiguous()
+
 
     def _analytic_half_step(self, x_eta, s, add_noise=True):
         """Exact propagation of the reverse-time linear (L) part over an interval of

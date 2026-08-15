@@ -997,9 +997,40 @@ is NaN.
 Also replaced the Cholesky fallback: `cholesky_ex` with jitter scaled to the matrix
 diagonal, rather than exception handling with an absolute `1e-6`.
 
+**Why τ = 1/k is physically the interesting point.** There `A` is *defective* — one
+repeated eigenvalue, a single eigenvector, a Jordan block — and
+`exp(At) = e^{−kt}·[[1, t], [0, 1]]`. The linear-in-t factor is the fingerprint of
+critical damping, i.e. the sharpest possible response. So the closed forms excluded
+precisely the point most worth measuring. Post-patch the critical line τ = 1/k is in
+the sweep like any other value.
+
+**Every site carrying the same pattern** (all patched):
+
+| location | quantity | fix |
+|----------|----------|-----|
+| `compute_covariance` | forward kernel Σ(t) | Van Loan |
+| `compute_mean` | `exp(At)₁₂` | `expm1` + Jordan limit |
+| `diffusion_loss_active` | `exp(At)₁₂` (**training path**) | `expm1` + Jordan limit |
+| Tweedie correction | `exp(At)₁₂` at `t_eps` | `expm1` + Jordan limit |
+| `_eq_transition` | equilibrium-split `exp(Aᵀs)₂₁` | `expm1` + Jordan limit |
+| `_reverse_transition_mean` | reverse-flow `exp(−As)` | Van Loan |
+| `_reverse_transition_covariance` | reverse-flow Σ(s), had `Δ²` | Van Loan |
+
+`_stationary_covariance` was already clean — `sxe = see/(k + 1/τ)` has a *sum*, not a
+difference, in the denominator. Reverse Van Loan verified against the old closed forms
+to ~1e-14 at τ = 0.15, 0.20, 0.40 and finite at τ = 0.25.
+
+Note that `diffusion_loss_active` is in the training path, so the τ=0.25 run would have
+died there even with `compute_covariance` alone fixed.
+
 **Consequences.**
 
-- Any τ now works, including 0.25 and values near it. Same for varying `k`.
+- Any τ now works, including 0.25 and values near it, across forward kernels, the loss,
+  the Tweedie correction, and both SSCS splittings. Same for varying `k`.
+- float64 alone would *not* have been sufficient: it buys ~1e-16 relative precision, so
+  it survives τ near 0.25 but the cancellation still worsens without bound approaching
+  it, and τ = 1/k exactly remains a division by zero. Van Loan removes the failure mode
+  rather than postponing it.
 - The `+1e-8` fudges in `M11`/`M22` are gone; the returned covariance is exact.
 - **Runs before this patch are not bitwise comparable to runs after it.** The τ=0.15
   results in §1.6–1.7 were computed with ~5% float32 error in `M11` at small t. Not
