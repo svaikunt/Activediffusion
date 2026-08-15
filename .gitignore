@@ -1,0 +1,30 @@
+# checkpoints and generated samples — large, regenerable
+*.pt
+*.pth
+fid*/
+fidgen_*/
+fidq*/
+fidcld*/
+gen_*/
+grid_notweedie/
+grid_tweedie/
+fid_samples_*/
+samples_epoch_*.png
+grid_*.png
+log_*.txt
+*.log
+
+# latex build artifacts
+*.aux
+*.out
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+
+# python
+__pycache__/
+*.pyc
+
+# os / misc
+.DS_Store
+*.pkg

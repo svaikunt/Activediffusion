@@ -538,53 +538,47 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
         return torch.randn(batch_size, 3, self.image_size, self.image_size, device=target_device) * std
 
     def compute_covariance(self, t):
-        """Compute covariance matrix - EXACTLY like original MNIST"""
-        batch_size = t.shape[0]
-        Tp = torch.full((batch_size,), self.Tp, device=t.device)
-        Ta = torch.full((batch_size,), self.Ta, device=t.device)
-        k = torch.full((batch_size,), self.k, device=t.device)
-        tau = torch.full((batch_size,), self.tau, device=t.device)
-        
-        # Compute intermediate terms (original formulation)
-        a = torch.exp(-k * t)
-        b = torch.exp(-t / tau)
-        Tx = Tp
-        Ty = Ta / (tau * tau)
-        w = 1 / tau
-        
-        # Compute matrix elements with proper active matter physics
-        M11 = (1/k)*Tx*(1-a*a) + (1/k)*Ty*(
-            1/(w*(k+w)) + 
-            4*a*b*k/((k+w)*(k-w)**2) - 
-            (k*b*b + w*a*a)/(w*(k-w)**2) + 1e-8
-        )
-        M12 = (Ty/(w*(k*k - w*w))) * (k*(1-b*b) - w*(1 + b*b - 2*a*b))
-        M22 = (Ty/w)*(1-b*b) + 1e-8
-        
-        # Stack elements to form covariance matrix
-        cov_matrix = torch.stack([
-            torch.stack([M11, M12], dim=1),
-            torch.stack([M12, M22], dim=1)
-        ], dim=1)
-        
-        return cov_matrix
+        """Covariance of (x_t, eta_t) via Van Loan's method.
+
+        The closed form has (k - 1/tau)^2 denominators whose bracket terms cancel to
+        ~1e-8 at small t.  In float32 the rounding error exceeds the result once 1/tau
+        approaches k (M11 goes negative and Cholesky fails at tau=0.2), and the
+        expression is singular at tau = 1/k.  Van Loan's method computes the same
+        quantity from a matrix exponential, with no such structure: exact at tau = 1/k
+        and stable everywhere.  Agrees with the closed form to ~1e-14.
+        """
+        dev, out_dtype = t.device, t.dtype
+        k  = float(self.k)
+        w  = 1.0 / float(self.tau)
+        Tx = float(self.Tp)
+        Ty = float(self.Ta) / float(self.tau) ** 2
+
+        A = torch.tensor([[-k, 1.0], [0.0, -w]], dtype=torch.float64, device=dev)
+        Q = torch.tensor([[2 * Tx, 0.0], [0.0, 2 * Ty]], dtype=torch.float64, device=dev)
+        Z = torch.zeros(2, 2, dtype=torch.float64, device=dev)
+        C = torch.cat([torch.cat([-A, Q], 1), torch.cat([Z, A.T], 1)], 0)
+
+        E = torch.linalg.matrix_exp(C * t.double().reshape(-1, 1, 1))
+        cov = E[:, 2:, 2:].transpose(-1, -2) @ E[:, :2, 2:]
+        cov = 0.5 * (cov + cov.transpose(-1, -2))
+        return cov.to(out_dtype)
 
     def generate_correlated_noise(self, covariance_matrix, num_channels=3):
         """Generate correlated noise for all RGB channels"""
         batch_size = covariance_matrix.shape[0]
         device = covariance_matrix.device
-        covariance_matrix = covariance_matrix.view(batch_size, 2, 2)
-        
-        # Try automatic Cholesky first
-        try:
-            L = torch.linalg.cholesky(covariance_matrix)
-        except RuntimeError as e:
-            if "positive-definite" in str(e):
-                # Add small regularization
-                reg = 1e-6 * torch.eye(2, device=device).unsqueeze(0).expand_as(covariance_matrix)
-                L = torch.linalg.cholesky(covariance_matrix + reg)
-            else:
-                raise e
+        cov = covariance_matrix.view(batch_size, 2, 2).double()
+        cov = 0.5 * (cov + cov.transpose(-1, -2))          # symmetrize
+        # jitter scaled to the matrix, not absolute: M11 is ~1e-6 at small t, so a
+        # fixed 1e-6 would dominate it rather than regularize it
+        scale = torch.diagonal(cov, dim1=-2, dim2=-1).amax(-1).clamp_min(1e-12)
+        eye = torch.eye(2, dtype=cov.dtype, device=device)
+        L, info = torch.linalg.cholesky_ex(cov + (1e-10 * scale)[:, None, None] * eye)
+        if int(info.max()) != 0:
+            L, info = torch.linalg.cholesky_ex(cov + (1e-6 * scale)[:, None, None] * eye)
+            if int(info.max()) != 0:
+                raise RuntimeError("covariance not positive-definite even with jitter")
+        L = L.to(covariance_matrix.dtype)
         
         # Generate 3 independent correlated noise pairs: (R,η_r), (G,η_g), (B,η_b)
         all_noise = []
@@ -613,10 +607,18 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
         # Reshape t for broadcasting
         t_view = t.view(-1, 1, 1, 1)
         
-        # Compute coefficients (original formulation)
+        # Compute coefficients.
+        # b is the (1,2) entry of exp(A t) for A = [[-k, 1], [0, -1/tau]].  Written as
+        # (e^{-t/tau} - e^{-kt})/(k - 1/tau) it is 0/0 at k = 1/tau (tau = 1/k), where A
+        # is defective; the true limit is t*e^{-kt}.  Use the expm1 form, which is also
+        # cancellation-free for small (k - 1/tau)*t.
+        d = k - (1.0 / tau)
         a = torch.exp(-k * t_view)
-        b = (torch.exp(-t_view / tau) - torch.exp(-k * t_view)) / (k - (1 / tau))
         c = torch.exp(-t_view / tau)
+        if abs(d) < 1e-8:                       # tau == 1/k : Jordan block limit
+            b = t_view * a
+        else:
+            b = a * torch.expm1(d * t_view) / d
         
         # Compute means for all channels
         mean_x = a * x_0 + b * eta_0
