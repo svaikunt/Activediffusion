@@ -498,6 +498,18 @@ The 10k→50k offset is **not constant** (1.69 vs 2.15), so the 10k history cann
 converted with a single factor — each reported number needs its own 50k run. The ordering
 does survive the change of N, so the 10k series remains valid for epoch-to-epoch decisions.
 
+**Matched-sampler comparison at N = 50,000** (quadratic PF-500), the publishable units:
+
+| epoch | active | passive | gap | note |
+|-------|--------|---------|-----|------|
+| 1000  | **9.50** (lr 2e-4) | _pending_ | — | active's best |
+| 1500  | 10.02 (lr 2e-4) | — | — | |
+| 1600  | ~10 (pending, 11.92@10k) | **13.96** (lr 1e-4 branch) | ~4 | |
+
+The 50k gap at epoch 1600 (~4) is smaller than the 10k series implied (~4.4–5), consistent
+with worse models carrying more small-sample bias. **The 10k numbers mildly overstate the
+active advantage** — another reason any reported gap needs its own 50k measurement.
+
 **9.50 is the best result from any current run**, against the old 2-GPU run's 7.91@50k
 (§1.2), which remains 1.59 ahead.
 
