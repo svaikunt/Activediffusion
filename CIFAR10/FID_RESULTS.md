@@ -988,6 +988,44 @@ was measured at different settings. Never compare across sample counts.
 
 ---
 
+### 1.8 τ sweep, epoch 600 (first post-patch measurements)
+
+Single GPU, batch 128, CLD recipe (lr 2e-4, warmup 100k, effective EMA 0.9999), all
+identical except τ. Scored PF-200 **quadratic**, N = 10,000 — chosen for speed, so these
+rank the arms against each other but are *not* comparable to the PF-500 history.
+
+| τ | k·τ | FID @ epoch 600 |
+|------|------|-----------------|
+| 0.10 | 0.4  | 28.40 |
+| 0.20 | 0.8  | 16.18 |
+| 0.40 | 1.6  | **12.34** |
+
+**Monotone and steep — a 2.3× spread.** The largest effect of any single knob measured in
+this project. The trend has not turned over at 0.4, so the optimum is likely higher; τ =
+0.6, 0.8, 1.0 are the next arms. τ = 0.25 (kτ = 1, critical damping) is also worth
+measuring now that the numerics allow it — it interpolates between two measured points, so
+a kink there would indicate the critical line is physically special and a smooth ~14 would
+indicate it is not.
+
+For scale: τ=0.4 reaches 12.34 at epoch 600 with only 200 sampler steps, where τ=0.15
+needed epoch 1000 and 500 steps for 11.19. Cross-config, so suggestive rather than proven.
+
+**Confound to separate before claiming τ is the interesting parameter.** τ also sets the
+stationary x-variance, since the η equilibrium variance is Ta/τ:
+
+| τ | stationary σ_x | vs data σ ≈ 0.5 |
+|------|----------------|------------------|
+| 0.10 | 1.143 | 2.3× |
+| 0.15 | 1.000 | 2.0× |
+| 0.20 | 0.889 | 1.8× |
+| 0.40 | 0.615 | 1.2× |
+
+So larger τ is also a *gentler* forward process with less to undo. Part of the gain may be
+that rather than the correlation time itself. Co-varying Ta to hold the stationary
+variance fixed would separate the two.
+
+---
+
 ## 5. Numerics: the active covariance and the τ sweep
 
 Discovered 2026-08-15 when a τ=0.2 run died with
