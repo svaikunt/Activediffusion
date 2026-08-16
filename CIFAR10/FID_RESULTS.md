@@ -1010,19 +1010,22 @@ indicate it is not.
 For scale: τ=0.4 reaches 12.34 at epoch 600 with only 200 sampler steps, where τ=0.15
 needed epoch 1000 and 500 steps for 11.19. Cross-config, so suggestive rather than proven.
 
-**Confound to separate before claiming τ is the interesting parameter.** τ also sets the
+**A "gentler diffusion" confound was considered and does not hold up.** τ does change the
 stationary x-variance, since the η equilibrium variance is Ta/τ:
 
-| τ | stationary σ_x | vs data σ ≈ 0.5 |
-|------|----------------|------------------|
-| 0.10 | 1.143 | 2.3× |
-| 0.15 | 1.000 | 2.0× |
-| 0.20 | 0.889 | 1.8× |
-| 0.40 | 0.615 | 1.2× |
+| τ | stationary var | σ_x | σ_x / data σ (≈0.5) |
+|------|----------------|-------|----------------------|
+| 0.10 | 1.143 | 1.069 | 2.14 |
+| 0.15 | 1.000 | 1.000 | 2.00 |
+| 0.20 | 0.889 | 0.943 | 1.89 |
+| 0.40 | 0.616 | 0.785 | 1.57 |
 
-So larger τ is also a *gentler* forward process with less to undo. Part of the gain may be
-that rather than the correlation time itself. Co-varying Ta to hold the stationary
-variance fixed would separate the two.
+But that is a 1.37× change in σ across the sweep, not enough to explain a 2.3× FID spread.
+The signal decays as `e^{−kt}` **independent of τ**, so every arm destroys the data equally
+by t = T. And the sampler initialises from `compute_covariance(T)` — the correct correlated
+stationary covariance for that τ — rather than a fixed N(0, I), so there is no prior
+mismatch either. The τ effect therefore appears to be about the dynamics, not about how
+much noise is added.
 
 ---
 
