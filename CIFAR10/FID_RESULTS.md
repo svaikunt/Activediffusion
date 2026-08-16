@@ -988,7 +988,27 @@ was measured at different settings. Never compare across sample counts.
 
 ---
 
-### 1.8 τ sweep — **best result in the project: τ=0.4, FID 7.31 @ N=50,000**
+### 1.8 τ sweep — **best result: τ=0.4, FID 7.31 @ N=50,000 — but see the caveat**
+
+> ⚠ **The τ=0.4 arm was trained BEFORE the Van Loan numerics patch (§5).** At τ=0.4,
+> `k − 1/τ = +1.5`, giving ~19% float32 error in `M11` at small t. The 7.31 measurement
+> is valid — that model exists and scores 7.31 — but it is **not reproducible from the
+> current code** and must not be reported as "τ=0.4 under the CLD recipe" without a
+> clean re-run.
+>
+> The sweep is also internally inconsistent: τ=0.1 (job 1374525) is pre-patch at ~3%
+> error, τ=0.2 (job 1374686) is post-patch and exact, τ=0.4 (job 1374477) is pre-patch at
+> ~19%. So "FID monotone in τ" is confounded with "M11 error varies by arm". The arm with
+> the largest error also has the best result, which shows the error is not fatal, but
+> forbids attributing 7.31 to τ.
+>
+> Likely train/eval mismatch as well: if the patched file was deployed before scoring,
+> that model was *trained* with the biased covariance and *sampled* with the corrected
+> one. The Tweedie step calls `compute_covariance(t_eps)`, precisely where the 19% sits.
+>
+> **Action: re-run τ=0.4 (and ideally τ=0.1) from scratch post-patch before reporting.**
+
+#### Numbers as measured
 
 Single GPU, batch 128, CLD recipe (lr 2e-4, warmup 100k, effective EMA 0.9999, T=2),
 all arms identical except τ. First measurements after the numerics patch.
