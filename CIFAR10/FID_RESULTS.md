@@ -988,7 +988,41 @@ was measured at different settings. Never compare across sample counts.
 
 ---
 
-### 1.8 τ sweep, epoch 600 (first post-patch measurements)
+### 1.8 τ sweep — **best result in the project: τ=0.4, FID 7.31 @ N=50,000**
+
+Single GPU, batch 128, CLD recipe (lr 2e-4, warmup 100k, effective EMA 0.9999, T=2),
+all arms identical except τ. First measurements after the numerics patch.
+
+**Headline, N = 50,000, quadratic PF-500 — directly comparable to §1.2's 7.91:**
+
+| run | epoch | optimizer steps | images | FID@50k |
+|-----|-------|-----------------|--------|---------|
+| old 2-GPU run (§1.2) | 2200 | 404k | 103M | 7.91 |
+| τ=0.15 CLD (§1.6) | 1000 | 390k | 50M | 9.50 |
+| **τ=0.40 CLD** | **1200** | **468k** | **60M** | **7.31** |
+
+Beats the previous project best by 0.60 on 42% fewer images, at epoch 1200 of a
+2000-epoch run. Still ~2.3× off published baselines (CLD 2.25, DDPM 3.17).
+
+**The sweep at N = 10,000** (lower steps for speed; ranks arms, not comparable to 50k):
+
+| τ | k·τ | @600, PF-200 | @1000, PF-300 | @1200, PF-300 |
+|------|------|--------------|---------------|---------------|
+| 0.10 | 0.4  | 28.40 | 12.88 | — |
+| 0.20 | 0.8  | 16.18 | 11.68 | — |
+| 0.40 | 1.6  | 12.34 | 9.68  | **9.52** |
+
+Monotone in τ at every epoch measured. The epoch-600 spread (28.40 → 12.34) is largely a
+*convergence-rate* effect — by epoch 1000 the 0.1→0.2 gap has collapsed from 12.22 to
+1.20 — but the 0.2→0.4 gap only narrows from 3.84 to 2.00, so a genuine quality
+difference remains. **The trend has not turned over**, so τ = 0.5, 0.6, 1.0 are the arms
+that matter; τ = 0.25 (kτ = 1, critical damping) fills the grid at the one point the old
+numerics could not reach.
+
+For scale, τ=0.4's 9.52 at 10k/PF-300 already beats anything τ=0.15 produced at 10k
+(best 11.19, and that at PF-500).
+
+### 1.8b Earlier framing of the epoch-600 sweep
 
 Single GPU, batch 128, CLD recipe (lr 2e-4, warmup 100k, effective EMA 0.9999), all
 identical except τ. Scored PF-200 **quadratic**, N = 10,000 — chosen for speed, so these
