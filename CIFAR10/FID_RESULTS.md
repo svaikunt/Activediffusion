@@ -504,7 +504,7 @@ does survive the change of N, so the 10k series remains valid for epoch-to-epoch
 |-------|--------|---------|-----|------|
 | 1000  | **9.50** (lr 2e-4) | **14.51** (lr 2e-4) | **5.01** | active's best |
 | 1500  | 10.02 (lr 2e-4) | — | — | |
-| 1600  | ~10 (pending, 11.92@10k) | **13.96** (lr 1e-4 branch) | ~4 | |
+| 1600  | **9.64** (lr 1e-4 branch) | **13.96** (lr 1e-4 branch) | **4.32** | |
 
 **The gap is stable across N.** At epoch 1000 it is 5.10 at N=10,000 and 5.01 at
 N=50,000 — a 0.09 difference. So while the absolute 10k values are biased high by
@@ -516,8 +516,15 @@ Sample-count offsets measured so far: 1.69 (active 1000), 2.15 (active 1500), 1.
 factor for any individual number.
 
 Passive's 50k trajectory is 14.51 (1000) → 13.96 (1600), improving 0.55 over 600 epochs,
-while active went 9.50 → ~10 over the same span. **Passive is closing**: the narrowing
-from 5.01 to ~4 is a real trend, not a measurement artifact.
+while active went 9.50 → 9.64, i.e. flat within scatter. **Passive is closing**: the gap
+narrows 5.01 → 4.32 over 600 epochs, a real trend rather than a measurement artifact, and
+the opposite of what the original log-schedule curves suggested (where the gap widened
+with training).
+
+**Active is flat at ~9.5–9.6 across the lr drop**, confirming in publishable units what
+the 10k series showed: halving the learning rate bought stability, not quality.
+
+Sample-count offsets, four measurements: 1.69 / 2.15 / 1.78 / 2.28 — span 1.69–2.28.
 
 **9.50 is the best result from any current run**, against the old 2-GPU run's 7.91@50k
 (§1.2), which remains 1.59 ahead.
