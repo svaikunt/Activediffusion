@@ -80,7 +80,7 @@ def parse_args():
     parser.add_argument('--pf_solver', type=str, default='heun', choices=['heun', 'rk45'])
 
     # Training hyperparams
-    parser.add_argument('--score_param', type=str, default='score', choices=['score', 'whitened'],
+    parser.add_argument('--score_param', type=str, default='score', choices=['score', 'whitened', 'cond'],
                         help="Active model only. 'score': net output is the score (original). "
                              "'whitened': net predicts Sigma^{-1/2}(z-mu), unit-scale target at "
                              "every t. Changes what the network represents -- not resumable across.")

@@ -463,7 +463,10 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
         # "whitened" : network outputs r = Sigma^{-1/2}(z - mu), unit scale at every t
         #              (the 2x2 analogue of passive's sigma*score = -eps); the score is
         #              then -Sigma^{-1/2} r.  Opt-in; "score" keeps old checkpoints valid.
-        assert score_param in ("score", "whitened"), score_param
+        # "cond": network still outputs the SCORE; only the loss whitener changes from
+        #         sqrt(det) to the conditional stds sqrt(v_x), sqrt(v_eta).  Sampling is
+        #         untouched.  This is the recommended variant.
+        assert score_param in ("score", "whitened", "cond"), score_param
         self.score_param = score_param
         self.image_size = image_size
         self.dt = T/timesteps  # Use T parameter like MNIST
@@ -705,8 +708,8 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
         score_param="whitened" -> the net predicts r = Sigma^{-1/2}(z - mu), so the
                                   score is -Sigma^{-1/2} r.
         """
-        if self.score_param == "score":
-            return model_output
+        if self.score_param in ("score", "cond"):
+            return model_output          # net already outputs the score in both modes
         w11, w12, w22 = self._inv_sqrt_cov(t)
         r_x = model_output[:, [0, 2, 4]]
         r_e = model_output[:, [1, 3, 5]]
@@ -732,6 +735,30 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
         # Use same noise from forward pass if provided
         if noise is None:
             noise = self.generate_correlated_noise(M, num_channels=3)
+
+        if self.score_param == "cond":
+            # Per-channel conditional whitening.  The i-th score component is the 1-D
+            # formula applied to the regression residual of noise_i on noise_j:
+            #     s_i = -(d_i - (M_ij/M_jj) d_j) / v_i ,   v_i = Var(d_i | d_j) = det/M_jj
+            # so sqrt(v_i) whitens it and the target has unit variance at every t --
+            # the exact analogue of passive's  sigma * score = -eps.
+            #
+            # The existing branch below whitens with sqrt(det) instead.  Since
+            #     sqrt(det) = sqrt(v_eta)*sqrt(M11) = sqrt(v_x)*sqrt(M22),
+            # that is the correct whitener times a spurious sqrt(M_jj), which drives the
+            # eta target from 0.73 at t=T down to 0.0014 at t=1e-3 (520x, tau=0.5).
+            # A single scalar cannot whiten two channels with different scales.
+            dx = noise[:, [0, 2, 4]]
+            de = noise[:, [1, 3, 5]]
+            M11 = M[:, 0, 0].view(-1, 1, 1, 1)
+            M12 = M[:, 0, 1].view(-1, 1, 1, 1)
+            M22 = M[:, 1, 1].view(-1, 1, 1, 1)
+            v_x = torch.clamp(M11 - M12 * M12 / M22, min=1e-20)   # Var(d_x | d_eta)
+            v_e = torch.clamp(M22 - M12 * M12 / M11, min=1e-20)   # Var(d_eta | d_x)
+            s_x_true = -(dx - (M12 / M22) * de) / v_x
+            s_e_true = -(de - (M12 / M11) * dx) / v_e
+            return (self.Tp * (v_x * (F_x - s_x_true) ** 2).mean()
+                    + self.Ta * (v_e * (F_eta - s_e_true) ** 2).mean())
 
         if self.score_param == "whitened":
             # Target r = Sigma^{-1/2}(z - mu) ~ N(0, I) exactly at every t.  Uniform
