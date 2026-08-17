@@ -988,6 +988,39 @@ was measured at different settings. Never compare across sample counts.
 
 ---
 
+### 1.8a **PROJECT BEST: τ=0.5, FID 6.91 @ N=50,000, epoch 1000**
+
+Quadratic PF-500, N = 50,000 — same configuration as §1.2's 7.91, directly comparable.
+
+| run | epoch | optimizer steps | images | FID@50k | numerics |
+|-----|-------|-----------------|--------|---------|----------|
+| old 2-GPU run (§1.2) | 2200 | 404k | 103M | 7.91 | — |
+| τ=0.15 CLD (§1.6) | 1000 | 390k | 50M | 9.50 | pre-patch |
+| τ=0.40 | 1200 | 468k | 60M | 7.31 | **pre-patch** (~19% M11 err) |
+| **τ=0.50** | **1000** | **390k** | **50M** | **6.91** | **post-patch, exact** |
+
+**τ=0.5 is the best result and the first record that is reproducible from current code** —
+τ=0.4's 7.31 was trained against the buggy float32 covariance. It also uses the fewest
+optimizer steps and least data of any arm, and τ=0.5 was still training when measured
+(target 2000 epochs).
+
+Still ~3× off CLD's 2.25 and ~2.2× off plain DDPM's 3.17.
+
+**At N = 10,000, PF-300, epoch 1000** — the sweep including the critical point:
+
+| τ | k·τ | FID | numerics |
+|------|------|-------|----------|
+| 0.10 | 0.4 | 12.88 | pre-patch |
+| 0.20 | 0.8 | 11.68 | post-patch |
+| **0.25** | **1.0** | **13.88** | post-patch |
+| 0.40 | 1.6 | 9.68 | pre-patch |
+| 0.50 | 2.0 | **8.89** | post-patch |
+
+Improving in τ **except for a sharp 2.2-FID spike at kτ = 1**. The three post-patch arms
+alone — 11.68 / 13.88 / 8.89 at τ = 0.2 / 0.25 / 0.5 — establish the kink on clean
+numerics on both sides. The critical-damping point is anomalously *bad*. Worth confirming
+at a second epoch before treating it as physics.
+
 ### 1.8 τ sweep — **best result: τ=0.4, FID 7.31 @ N=50,000 — but see the caveat**
 
 > ⚠ **The τ=0.4 arm was trained BEFORE the Van Loan numerics patch (§5).** At τ=0.4,
