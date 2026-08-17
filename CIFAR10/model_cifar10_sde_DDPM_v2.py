@@ -90,6 +90,7 @@ class CIFAR10_Active_Diffusion_SDE_V2(_CIFAR10_Active_Diffusion_SDE_Base):
         tau: float = 0.1,
         T: float = 2.0,
         dropout: float = 0.1,
+        score_param: str = "score",
     ):
         super().__init__(
             image_size=image_size,
@@ -103,6 +104,7 @@ class CIFAR10_Active_Diffusion_SDE_V2(_CIFAR10_Active_Diffusion_SDE_Base):
             k=k,
             tau=tau,
             T=T,
+            score_param=score_param,
         )
 
         # Replace the UNet with a configurable-attention version.

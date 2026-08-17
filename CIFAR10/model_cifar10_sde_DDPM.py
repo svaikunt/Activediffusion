@@ -454,10 +454,17 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
         k=1.0,
         tau=0.4,
         T=2.0,
+        score_param="score",
     ):
         super().__init__()
         self.timesteps = timesteps
         self.in_channels = 6  # RGB + 3 eta channels
+        # "score"    : network output IS the score (original formulation).
+        # "whitened" : network outputs r = Sigma^{-1/2}(z - mu), unit scale at every t
+        #              (the 2x2 analogue of passive's sigma*score = -eps); the score is
+        #              then -Sigma^{-1/2} r.  Opt-in; "score" keeps old checkpoints valid.
+        assert score_param in ("score", "whitened"), score_param
+        self.score_param = score_param
         self.image_size = image_size
         self.dt = T/timesteps  # Use T parameter like MNIST
         self.time_range = T
@@ -675,6 +682,39 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
         
         return (x_t, eta_t), (F_x, F_eta), (mean_x, mean_eta), cov, noise
 
+    def _inv_sqrt_cov(self, t):
+        """Sigma(t)^{-1/2} for the 2x2 (x, eta) covariance, in closed form.
+
+        For SPD Sigma = [[A,B],[B,C]]:  s = sqrt(det), u = sqrt(A+C+2s),
+        Sigma^{1/2} = (Sigma + s I)/u  and  Sigma^{-1/2} = [[C+s,-B],[-B,A+s]]/(s u).
+        Returns (w11, w12, w22) shaped (-1,1,1,1) for broadcasting.
+        """
+        M = self.compute_covariance(t.reshape(-1))
+        A, B, C = M[:, 0, 0], M[:, 0, 1], M[:, 1, 1]
+        sdet = torch.sqrt(torch.clamp(A * C - B * B, min=1e-20))
+        u = torch.sqrt(torch.clamp(A + C + 2 * sdet, min=1e-20))
+        den = (sdet * u).view(-1, 1, 1, 1)
+        return ((C + sdet).view(-1, 1, 1, 1) / den,
+                (-B).view(-1, 1, 1, 1) / den,
+                (A + sdet).view(-1, 1, 1, 1) / den)
+
+    def _score_from_output(self, model_output, t):
+        """Convert the network output to a score.
+
+        score_param="score"    -> identity (original behaviour, old checkpoints).
+        score_param="whitened" -> the net predicts r = Sigma^{-1/2}(z - mu), so the
+                                  score is -Sigma^{-1/2} r.
+        """
+        if self.score_param == "score":
+            return model_output
+        w11, w12, w22 = self._inv_sqrt_cov(t)
+        r_x = model_output[:, [0, 2, 4]]
+        r_e = model_output[:, [1, 3, 5]]
+        out = torch.zeros_like(model_output)
+        out[:, [0, 2, 4]] = -(w11 * r_x + w12 * r_e)
+        out[:, [1, 3, 5]] = -(w12 * r_x + w22 * r_e)
+        return out
+
     def diffusion_loss_active(self, model_output, rgb_images, eta_0, t, noise=None):
         """Compute loss - EXACTLY like MNIST but for 3 channels"""
         device = rgb_images.device
@@ -692,6 +732,17 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
         # Use same noise from forward pass if provided
         if noise is None:
             noise = self.generate_correlated_noise(M, num_channels=3)
+
+        if self.score_param == "whitened":
+            # Target r = Sigma^{-1/2}(z - mu) ~ N(0, I) exactly at every t.  Uniform
+            # weight, both channels: Sigma^{-1/2} mixes them (|w12| ~ w22 over most of
+            # the trajectory), so a down-weighted x-channel would corrupt the eta-score.
+            w11, w12, w22 = self._inv_sqrt_cov(t.squeeze())
+            dx = noise[:, [0, 2, 4]]
+            de = noise[:, [1, 3, 5]]
+            r_x = w11 * dx + w12 * de
+            r_e = w12 * dx + w22 * de
+            return ((F_x - r_x) ** 2 + (F_eta - r_e) ** 2).mean()
         
         # Extract noise components
         noise_rgb = noise[:, [0,2,4]]
@@ -786,7 +837,7 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
         t_tensor = torch.full((n_samples,), t_eps, device=device)
         model_input = x_eta.clone()
         model_input[:, [1, 3, 5]] = model_input[:, [1, 3, 5]] / scale
-        model_output = self.model(model_input, self._normalize_time(t_tensor))
+        model_output = self._score_from_output(self.model(model_input, self._normalize_time(t_tensor)), t_tensor)
 
         x_t = x_eta[:, [0, 2, 4]]
         eta_t = x_eta[:, [1, 3, 5]]
@@ -1037,7 +1088,7 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
             t_tensor = torch.full((n_samples,), t_score.item(), device=device)
             model_input = x_eta.clone()
             model_input[:, [1, 3, 5]] = model_input[:, [1, 3, 5]] / scale
-            model_output = self.model(model_input, self._normalize_time(t_tensor))
+            model_output = self._score_from_output(self.model(model_input, self._normalize_time(t_tensor)), t_tensor)
             if use_eq:
                 force = self._eq_score_force(model_output, x_eta)
             else:
@@ -1099,7 +1150,7 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
                 t_tensor = torch.full((n_samples,), float(t_scalar), device=device)
                 model_input = z.clone()
                 model_input[:, [1, 3, 5]] = model_input[:, [1, 3, 5]] / scale
-                model_output = self.model(model_input, self._normalize_time(t_tensor))
+                model_output = self._score_from_output(self.model(model_input, self._normalize_time(t_tensor)), t_tensor)
                 return self._active_pf_drift(z, model_output, Tp_tensor, Ta_tensor, tau_tensor)
 
             x_eta = _rk45_integrate(
@@ -1125,7 +1176,7 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
                 scale = self.eta_scale_tensor.view(1, 1, 1, 1).to(x_eta.device)
                 model_input = x_eta.clone()
                 model_input[:, [1,3,5]] = model_input[:, [1,3,5]] / scale
-                model_output = self.model(model_input, self._normalize_time(t_tensor))
+                model_output = self._score_from_output(self.model(model_input, self._normalize_time(t_tensor)), t_tensor)
                 drift_curr = self._active_pf_drift(x_eta, model_output, Tp_tensor, Ta_tensor, tau_tensor)
 
                 x_pred = x_eta + drift_curr * dt  # Euler prediction to t_next
@@ -1134,7 +1185,7 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
                 t_next_tensor = torch.full((n_samples,), t_next.item(), device=device)
                 model_input_next = x_pred.clone()
                 model_input_next[:, [1,3,5]] = model_input_next[:, [1,3,5]] / scale
-                model_output_next = self.model(model_input_next, self._normalize_time(t_next_tensor))
+                model_output_next = self._score_from_output(self.model(model_input_next, self._normalize_time(t_next_tensor)), t_next_tensor)
                 drift_next = self._active_pf_drift(x_pred, model_output_next, Tp_tensor, Ta_tensor, tau_tensor)
 
                 # Heun update (average of drifts)
@@ -1162,7 +1213,7 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
                 scale = self.eta_scale_tensor.view(1, 1, 1, 1).to(x_eta.device)
                 model_input = x_eta.clone()
                 model_input[:, [1,3,5]] = model_input[:, [1,3,5]] / scale
-                model_output = self.model(model_input, self._normalize_time(t_tensor))
+                model_output = self._score_from_output(self.model(model_input, self._normalize_time(t_tensor)), t_tensor)
 
                 is_final_step = tweedie and (idx == n_intervals - 1)
 
@@ -1236,7 +1287,7 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
                 t_tensor = torch.full((batch_size,), float(t_scalar), device=device)
                 model_input = z.clone()
                 model_input[:, [1, 3, 5]] = model_input[:, [1, 3, 5]] / scale
-                model_output = self.model(model_input, self._normalize_time(t_tensor))
+                model_output = self._score_from_output(self.model(model_input, self._normalize_time(t_tensor)), t_tensor)
                 return self._active_pf_drift(z, model_output, Tp_tensor, Ta_tensor, tau_tensor)
 
             x_eta = _rk45_integrate(
@@ -1261,14 +1312,14 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
                 scale = self.eta_scale_tensor.view(1, 1, 1, 1).to(x_eta.device)
                 model_input = x_eta.clone()
                 model_input[:, [1,3,5]] = model_input[:, [1,3,5]] / scale
-                model_output = self.model(model_input, self._normalize_time(t_tensor))
+                model_output = self._score_from_output(self.model(model_input, self._normalize_time(t_tensor)), t_tensor)
                 drift_curr = self._active_pf_drift(x_eta, model_output, Tp_tensor, Ta_tensor, tau_tensor)
                 x_euler = x_eta + drift_curr * dt
 
                 t_next_tensor = torch.full((batch_size,), t_next.item(), device=device)
                 model_input_next = x_euler.clone()
                 model_input_next[:, [1,3,5]] = model_input_next[:, [1,3,5]] / scale
-                model_output_next = self.model(model_input_next, self._normalize_time(t_next_tensor))
+                model_output_next = self._score_from_output(self.model(model_input_next, self._normalize_time(t_next_tensor)), t_next_tensor)
                 drift_next = self._active_pf_drift(x_euler, model_output_next, Tp_tensor, Ta_tensor, tau_tensor)
 
                 x_eta = x_eta + 0.5 * dt * (drift_curr + drift_next)
@@ -1279,7 +1330,7 @@ class CIFAR10_Active_Diffusion_SDE(nn.Module):
                 scale = self.eta_scale_tensor.view(1, 1, 1, 1).to(x_eta.device)
                 model_input = x_eta.clone()
                 model_input[:, [1, 3, 5]] = model_input[:, [1, 3, 5]] / scale
-                model_output = self.model(model_input, self._normalize_time(t_tensor))
+                model_output = self._score_from_output(self.model(model_input, self._normalize_time(t_tensor)), t_tensor)
 
                 # Determine if this is the final step (t=0)
                 is_final_step = (t == 0)

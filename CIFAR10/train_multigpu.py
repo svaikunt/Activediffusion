@@ -80,6 +80,10 @@ def parse_args():
     parser.add_argument('--pf_solver', type=str, default='heun', choices=['heun', 'rk45'])
 
     # Training hyperparams
+    parser.add_argument('--score_param', type=str, default='score', choices=['score', 'whitened'],
+                        help="Active model only. 'score': net output is the score (original). "
+                             "'whitened': net predicts Sigma^{-1/2}(z-mu), unit-scale target at "
+                             "every t. Changes what the network represents -- not resumable across.")
     parser.add_argument('--warmup_steps', type=int, default=5000)
     parser.add_argument('--grad_clip', type=float, default=1.0)
     parser.add_argument('--weight_decay', type=float, default=0.0)
@@ -199,7 +203,8 @@ def main():
             Ta=args.Ta,
             k=args.k,
             tau=args.tau,
-            T=args.T
+            T=args.T,
+            score_param=args.score_param
         )
     else:
         model = CIFAR10Diffusion_SDE_V2(

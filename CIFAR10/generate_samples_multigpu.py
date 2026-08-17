@@ -58,6 +58,8 @@ def parse_args():
     parser.add_argument("--tau", type=float, default=0.4)
     parser.add_argument("--k", type=float, default=1.0)
     parser.add_argument("--T", type=float, default=2.0)
+    parser.add_argument("--score_param", type=str, default="score", choices=["score", "whitened"],
+                        help="Must match the checkpoint's training value (stored in ckpt['args']).")
     parser.add_argument("--num_samples", type=int, default=50000, help="Total number of images to generate")
     parser.add_argument("--batch_size", type=int, default=256, help="Generation batch size PER GPU")
     parser.add_argument("--output_dir", type=str, default="fid_samples", help="Where to save PNG files")
@@ -145,6 +147,7 @@ def build_model(args, device, dim_mults, attn_resolutions):
             k=args.k,
             tau=args.tau,
             T=args.T,
+            score_param=args.score_param,
         )
     else:
         model = CIFAR10Diffusion_SDE_V2(
