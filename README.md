@@ -29,37 +29,38 @@ What changes is the *relationship*. At t = T the two panels are near-copies of e
 (nearest-neighbour pixel correlation rises from 0.00 to 0.93) and **decouples** from the
 field that drove it, with the correlation falling to zero. The trace underneath tracks it.
 
-![Noise to t*=0.4, then reverse](active_recovery.gif)
+### Does the image come back?
 
-**Does the image come back?** A real image is noised to t\*=0.4 — pure noise to the eye,
-with only 16% of the original surviving in the noised state — and then reversed. Both arms
-start from the *identical* noised state; the only difference is that the right column has η
-permuted across the batch, which preserves η's distribution exactly and destroys only its
-pairing with x.
+A real image is noised to t\*, then reversed. Both arms start from the **identical** noised
+state; the only difference is that the right column has η permuted across the batch, which
+preserves η's distribution exactly and destroys only its pairing with x. So the gap between
+the two columns is the x–η correlation and nothing else.
 
-With matched η the originals come back at **31%** of the pixel variance: recognisably the
-same images, softened. With η shuffled, **651%** — far past the ~200% two unrelated images
-would give, so a mismatched η does not merely fail to help, it drives the sampler
+Three depths, increasingly noised:
+
+**t\* = 0.40** — matched **30%**, shuffled 647%. Median per-image correlation 0.78.
+
+![t*=0.40](active_recovery_t040.gif)
+
+**t\* = 0.45** — matched **39%**, shuffled 673%. Median 0.72; 37 of 49 tiles now below 0.8.
+
+![t*=0.45](active_recovery_t045.gif)
+
+**t\* = 0.50** — matched **49%**, shuffled 679%. Median 0.64; 41 of 49 below 0.8.
+
+![t*=0.50](active_recovery_t050.gif)
+
+Only 16% of the original survives in the noised state at t\*=0.4, and 10% at 0.5 — nothing
+is discernible by eye in any of the three starting states. Yet with matched η the images
+come back. With η shuffled they never do: 650–680% is well past the ~200% two unrelated
+images would give, so a mismatched η does not merely fail to help, it drives the sampler
 off-distribution.
 
-Sweeping how far to noise before turning around:
-
-| t\* | corr(x_t\*, x₀) | matched | shuffled | median per-image corr | tiles below 0.8 |
-|---|---|---|---|---|---|
-| 0.10 | 0.76 | 1.6% | 103% | — | — |
-| 0.20 | 0.43 | 6.8% | 322% | — | — |
-| 0.30 | 0.25 | 16.2% | 528% | 0.88 | 8 / 49 |
-| **0.40** | **0.16** | **30.6%** | 652% | **0.78** | 28 / 49 |
-| 0.45 | 0.12 | 39.7% | 679% | 0.72 | 37 / 49 |
-| 0.50 | 0.10 | 49.6% | 686% | 0.64 | 41 / 49 |
-
-**Recovery has a limit, and it sits just past t\*=0.4.** By 0.45 the median per-image
-correlation with the original has fallen to 0.72 with 37 of 49 tiles below 0.8, and by 0.5
-it is 0.64 with 41 of 49 — most images come back as a *different* picture sharing the
-composition and palette, so "the image comes back" stops being true.
-t\*=0.4 is the most heavily noised point where the claim still holds, which is why it is
-shown above. Locating that boundary is itself the measurement: it is where η's information
-about the injected noise runs out.
+Watching the three in sequence shows where it breaks. At 0.40 the returned images are the
+originals, softened. By 0.50 the majority of tiles come back as a *different* picture
+sharing the composition and palette — the aggregate MSE only doubles, but the per-image
+correlation tells the real story, falling 0.78 → 0.72 → 0.64. **The recovery limit sits
+just past t\*=0.4**, and that is where η's information about the injected noise runs out.
 
 Note what this does and doesn't say: η₀ is drawn independently of x₀, so η carries no
 information about the *image*. It carries information about the *noise that was added* —
