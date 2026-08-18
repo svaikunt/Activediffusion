@@ -62,6 +62,30 @@ sharing the composition and palette — the aggregate MSE only doubles, but the 
 correlation tells the real story, falling 0.78 → 0.72 → 0.64. **The recovery limit sits
 just past t\*=0.4**, and that is where η's information about the injected noise runs out.
 
+### The class survives even when the image does not
+
+![class memory](class_memory.png)
+
+512 images, noised to t\*, reversed, classified. The reference class is the classifier's own
+prediction on the *original*, so classifier error cancels out of the agreement rate.
+
+| t\* | pixel corr | class kept, η matched | η shuffled |
+|---|---|---|---|
+| 0.40 | 0.79 | **61.1%** | 10.9% |
+| 0.50 | 0.66 | **45.1%** | 10.7% |
+| 0.60 | 0.51 | **32.4%** | 11.5% |
+| 0.80 | 0.25 | **17.6%** | 11.1% |
+| 1.00 | 0.08 | 10.5% | 10.0% |
+
+**The shuffled arm is at the 10% chance floor at every t\*** — not degraded, not partial.
+Every bit of recoverable class identity is carried by the x–η pairing. Meanwhile at
+t\*=0.5–0.6 the matched arm returns images that are visibly *different* from the originals
+(pixel correlation 0.51–0.66) yet still lands a third to a half of them in the right class.
+
+Stated carefully: this does **not** show semantics outliving pixels. Both decay together and
+both reach their floor at t\*≈1. What it shows is that the correlation is the sole carrier —
+break it and there is nothing left above chance.
+
 Note what this does and doesn't say: η₀ is drawn independently of x₀, so η carries no
 information about the *image*. It carries information about the *noise that was added* —
 which is what lets the reverse process subtract the contamination instead of guessing at
