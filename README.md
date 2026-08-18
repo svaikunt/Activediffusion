@@ -17,6 +17,20 @@ two-variable SDE (or its probability-flow ODE).
 
 ---
 
+![Reverse-time active sampling](active_sampling.gif)
+
+Reverse-time sampling from the τ=0.5 model. Both panels are on **fixed** scales, so the
+amplitudes are real. The image `x` forms on the left; the active noise `η` on the right
+never changes amplitude — it is an autonomous OU process already at equilibrium, so its
+marginal is the same at every *t*.
+
+What changes is the *relationship*. At t = T the two panels are near-copies of each other,
+`corr(x, η) = 0.82` — the stationary correlation. As t → 0, `x` acquires image statistics
+(nearest-neighbour pixel correlation rises from 0.00 to 0.93) and **decouples** from the
+field that drove it, with the correlation falling to zero. The trace underneath tracks it.
+
+---
+
 ## Current result — CIFAR-10, unconditional
 
 All rows below are the **same architecture, optimizer, EMA, batch size, learning-rate
