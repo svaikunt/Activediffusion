@@ -49,8 +49,6 @@ it. That is the mechanism behind the active model's advantage.
 
 ---
 
----
-
 ## Current result — CIFAR-10, unconditional
 
 All rows below are the **same architecture, optimizer, EMA, batch size, learning-rate
