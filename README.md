@@ -28,7 +28,7 @@ differ only in the SDE and, for the two τ=0.5 rows, only in the loss weighting.
 | **active, τ=0.5** | **conditional whitening** | **4.98** |
 | active, τ=0.5 | original (`√det M`) | 6.91 |
 | active, τ=0.15 | original (`√det M`) | 9.50 |
-| **passive baseline** | standard (`σ·score = −ε`) | **14.51** |
+| **passive baseline** | standard (`σ·score = −ε`) | **14.51** † |
 
 Measured with `clean-fid` (`legacy_pytorch`) against the CIFAR-10 train split,
 N = 50,000, quadratic probability-flow sampler at 500 steps, Heun solver.
@@ -37,12 +37,16 @@ N = 50,000, quadratic probability-flow sampler at 500 steps, Heun solver.
 of that advantage came from fixing the loss weighting rather than from the SDE itself —
 see [`CIFAR10/whitening_note.pdf`](CIFAR10/whitening_note.pdf).
 
+† The checkpoint behind the 14.51 (`passive_cld_lr2e4`) was lost to a scratch purge, so
+that number is a valid past measurement but cannot be re-scored. The strongest passive
+result still backed by a surviving checkpoint is **13.96** (`passive_cld_lr1e4`, epoch
+1600, N = 50,000) — against which active with conditional whitening is **2.8× better on
+40% less training**. Prefer that comparison when the difference matters.
+
 Two honest qualifications. The passive model is *disadvantaged* by this recipe — it prefers
-a larger effective batch — and it also keeps improving past epoch 1000. Its best measured
-result at N = 50,000 is **13.96**, at epoch 1600 on a lower-learning-rate branch, i.e. a
-60% larger training budget than the table above. Even against that, active with
-conditional whitening is 2.8× better on 60% less training. Conversely, the active τ=0.15
-row predates a numerics fix (see below) and is not reproducible from current code.
+a larger effective batch — and it keeps improving past epoch 1000, which is why its best
+result comes at epoch 1600 rather than 1000. Conversely, the active τ=0.15 row predates a
+numerics fix (see below) and is likewise not reproducible from current code.
 
 For orientation against the literature, published unconditional CIFAR-10 FIDs are DDPM
 3.17 and CLD 2.25 — both at roughly twice the parameter count and far longer training than
