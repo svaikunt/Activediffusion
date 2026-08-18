@@ -29,18 +29,28 @@ What changes is the *relationship*. At t = T the two panels are near-copies of e
 (nearest-neighbour pixel correlation rises from 0.00 to 0.93) and **decouples** from the
 field that drove it, with the correlation falling to zero. The trace underneath tracks it.
 
-![Noise to t*=0.2, then reverse](active_recovery.gif)
+![Noise to t*=0.3, then reverse](active_recovery.gif)
 
-**Does the image come back?** A real image is noised to t\*=0.2 — visually pure noise, with
-signal variance 0.05 against 0.245 of noise — and then reversed. Both arms start from the
-*identical* noised state; the only difference is that the right column has η permuted
-across the batch, which preserves η's distribution exactly and destroys only its pairing
-with x.
+**Does the image come back?** A real image is noised to t\*=0.3 — visually indistinguishable
+from noise — and then reversed. Both arms start from the *identical* noised state; the only
+difference is that the right column has η permuted across the batch, which preserves η's
+distribution exactly and destroys only its pairing with x.
 
-With matched η the originals come back to **6.8%** of the pixel variance. With η shuffled,
-**321%** — further from the original than two unrelated images would be (~200%), so a
-mismatched η does not merely fail to help, it actively misleads. The same experiment at
-t\*=0.10 and 0.15 gives 1.6% vs 103% and 3.7% vs 206%.
+With matched η the originals come back to **16%** of the pixel variance. With η shuffled,
+**528%** — far past the ~200% two unrelated images would give, so a mismatched η does not
+merely fail to help, it drives the sampler off-distribution.
+
+Sweeping how far to noise before turning around:
+
+| t\* | corr(x_t\*, x₀) | matched | shuffled |
+|---|---|---|---|
+| 0.10 | 0.76 | 1.6% | 103% |
+| 0.20 | 0.43 | 6.8% | 322% |
+| **0.30** | **0.25** | **16.2%** | 528% |
+| 0.40 | 0.16 | 30.6% | 652% |
+
+Recovery degrades gracefully and is still good at t\*=0.3, where only 25% of the original
+survives in the noised state. It visibly breaks by 0.4.
 
 Note what this does and doesn't say: η₀ is drawn independently of x₀, so η carries no
 information about the *image*. It carries information about the *noise that was added* —
