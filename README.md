@@ -60,9 +60,13 @@ a larger effective batch — and it keeps improving past epoch 1000, which is wh
 result comes at epoch 1600 rather than 1000. Conversely, the active τ=0.15 row predates a
 numerics fix (see below) and is likewise not reproducible from current code.
 
-For orientation against the literature, published unconditional CIFAR-10 FIDs are DDPM
-3.17 and CLD 2.25 — both at roughly twice the parameter count and far longer training than
-anything here.
+Comparisons against published models are deliberately left out here. Every row above shares
+one architecture, one optimizer and one budget, which is what makes the active-vs-passive
+difference attributable to the SDE and the loss. Published CIFAR-10 numbers come from
+different architectures, parameter counts, training lengths and — in the discrete-time
+case — learned noise schedules, so setting them beside these would compare four things at
+once. They are recorded in [`CIFAR10/FID_RESULTS.md`](CIFAR10/FID_RESULTS.md) where the
+caveats can be stated properly.
 
 ---
 
