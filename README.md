@@ -44,16 +44,22 @@ off-distribution.
 
 Sweeping how far to noise before turning around:
 
-| t\* | corr(x_t\*, x₀) | matched | shuffled |
-|---|---|---|---|
-| 0.10 | 0.76 | 1.6% | 103% |
-| 0.20 | 0.43 | 6.8% | 322% |
-| 0.30 | 0.25 | 16.2% | 528% |
-| **0.40** | **0.16** | **30.6%** | 652% |
+| t\* | corr(x_t\*, x₀) | matched | shuffled | median per-image corr | tiles below 0.8 |
+|---|---|---|---|---|---|
+| 0.10 | 0.76 | 1.6% | 103% | — | — |
+| 0.20 | 0.43 | 6.8% | 322% | — | — |
+| 0.30 | 0.25 | 16.2% | 528% | 0.88 | 8 / 49 |
+| **0.40** | **0.16** | **30.6%** | 652% | **0.78** | 28 / 49 |
+| 0.45 | 0.12 | 39.7% | 679% | 0.72 | 37 / 49 |
+| 0.50 | 0.10 | 49.6% | 686% | 0.64 | 41 / 49 |
 
-Recovery degrades gracefully rather than falling off a cliff. At t\*=0.2 the image tiles are
-still faintly visible in the noised state, so t\*=0.4 is the honest demonstration — nothing
-of the original is discernible there by eye.
+**Recovery has a limit, and it sits just past t\*=0.4.** By 0.45 the median per-image
+correlation with the original has fallen to 0.72 with 37 of 49 tiles below 0.8, and by 0.5
+it is 0.64 with 41 of 49 — most images come back as a *different* picture sharing the
+composition and palette, so "the image comes back" stops being true.
+t\*=0.4 is the most heavily noised point where the claim still holds, which is why it is
+shown above. Locating that boundary is itself the measurement: it is where η's information
+about the injected noise runs out.
 
 Note what this does and doesn't say: η₀ is drawn independently of x₀, so η carries no
 information about the *image*. It carries information about the *noise that was added* —

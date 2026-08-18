@@ -26,7 +26,10 @@ ap.add_argument("npz")
 ap.add_argument("--out", default="active_recovery.gif")
 ap.add_argument("--grid", type=int, default=7)
 ap.add_argument("--fps", type=int, default=11)
-ap.add_argument("--hold", type=int, default=18)
+ap.add_argument("--hold", type=int, default=18, help="frames held on the final state")
+ap.add_argument("--lead", type=int, default=10, help="frames held on the noised start")
+ap.add_argument("--ease", type=int, default=8,
+                help="show each of the first N frames twice, easing in")
 ap.add_argument("--colors", type=int, default=72)
 a = ap.parse_args()
 
@@ -124,7 +127,11 @@ score = axC.text(1.0, 1.06, "", color=INK2, fontsize=8 * FS,
                  transform=axC.transAxes)
 
 frames = []
-for i in list(range(F)) + [F - 1] * a.hold:
+order = ([0] * a.lead
+         + [i for i in range(min(a.ease, F)) for _ in (0, 1)]
+         + list(range(min(a.ease, F), F))
+         + [F - 1] * a.hold)
+for i in order:
     imM.set_data(show(xm[i])); imS.set_data(show(xs[i]))
     lm.set_data(times[:i+1], mse_m[:i+1]); ls.set_data(times[:i+1], mse_s[:i+1])
     pm.set_data([times[i]], [mse_m[i]]); ps.set_data([times[i]], [mse_s[i]])
