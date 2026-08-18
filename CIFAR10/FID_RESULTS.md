@@ -1158,8 +1158,24 @@ A pure offset would have given 5.67 × 0.917 = 5.20; the measured 4.98 is below 
 other per-200-epoch ratio in this project sits at 0.90–0.97 (§1.1), so 0.878 is the
 fastest interval recorded here.
 
-Projecting cond's own rate forward — one interval only, and deceleration is universal, so
-treat as an upper bound on progress: 1200 → 4.37, 1400 → 3.84, 1600 → 3.37.
+#### Epoch 1200 — **4.88**, and the rate collapses. Run stopped here.
+
+| epoch | 800 | 1000 | 1200 |
+|-------|------|------|------|
+| FID @50k, quad PF-500 | 5.67 | 4.98 | **4.88** |
+| ratio to previous | — | 0.878 | **0.980** |
+
+Projected from the 0.878 interval, epoch 1200 should have been ≈4.37 (band 4.4–4.6). It
+came in at **4.88**, well above — the improvement rate decayed by more than the whole
+projection assumed. Extrapolating a single interval was the error; one ratio does not
+establish a rate.
+
+0.980 is slower than any interval recorded in §1.1 (0.90–0.97), and in that run a ratio of
+0.972 (12.69 → 12.34) came immediately before the minimum at 12.20 and the subsequent rise
+to 13.04. **Training was stopped at 1200 on that basis.** 4.88 is the final result.
+
+Whether 1200 is the true minimum is unmeasured — epoch 1400 was never scored. If the §1.1
+pattern holds, 1200 is at or just before the floor and later checkpoints would be worse.
 
 **Against published unconditional CIFAR-10:** EDM 1.97 · NCSN++ 2.20 · CLD 2.25 ·
 DDPM 3.17 · DDIM-100 4.04 · **this 4.98** · NCSNv2 10.87. Gap to CLD is now 2.2×, down

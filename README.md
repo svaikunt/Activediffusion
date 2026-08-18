@@ -33,6 +33,18 @@ differ only in the SDE and, for the two τ=0.5 rows, only in the loss weighting.
 Measured with `clean-fid` (`legacy_pytorch`) against the CIFAR-10 train split,
 N = 50,000, quadratic probability-flow sampler at 500 steps, Heun solver.
 
+The table is fixed at epoch 1000 so that all four rows are matched. The **best result
+obtained is FID 4.88**, at epoch 1200, where the conditional-whitening run was stopped:
+
+| epoch | 800 | 1000 | 1200 |
+|---|---|---|---|
+| active τ=0.5, cond | 5.67 | 4.98 | **4.88** |
+| ratio to previous | — | 0.878 | 0.980 |
+
+The improvement rate collapsed from 0.878 to 0.980 in one interval, so the run was at or
+near its floor; every other per-200-epoch ratio in this project falls in 0.90–0.97, and in
+an earlier run a ratio of 0.972 immediately preceded the minimum and a subsequent rise.
+
 **Active beats the passive baseline by 2.9× at matched training budget**, and roughly half
 of that advantage came from fixing the loss weighting rather than from the SDE itself —
 see [`CIFAR10/whitening_note.pdf`](CIFAR10/whitening_note.pdf).
