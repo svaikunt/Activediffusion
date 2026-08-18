@@ -29,6 +29,26 @@ What changes is the *relationship*. At t = T the two panels are near-copies of e
 (nearest-neighbour pixel correlation rises from 0.00 to 0.93) and **decouples** from the
 field that drove it, with the correlation falling to zero. The trace underneath tracks it.
 
+![Noise to t*=0.2, then reverse](active_recovery.gif)
+
+**Does the image come back?** A real image is noised to t\*=0.2 — visually pure noise, with
+signal variance 0.05 against 0.245 of noise — and then reversed. Both arms start from the
+*identical* noised state; the only difference is that the right column has η permuted
+across the batch, which preserves η's distribution exactly and destroys only its pairing
+with x.
+
+With matched η the originals come back to **6.8%** of the pixel variance. With η shuffled,
+**321%** — further from the original than two unrelated images would be (~200%), so a
+mismatched η does not merely fail to help, it actively misleads. The same experiment at
+t\*=0.10 and 0.15 gives 1.6% vs 103% and 3.7% vs 206%.
+
+Note what this does and doesn't say: η₀ is drawn independently of x₀, so η carries no
+information about the *image*. It carries information about the *noise that was added* —
+which is what lets the reverse process subtract the contamination instead of guessing at
+it. That is the mechanism behind the active model's advantage.
+
+---
+
 ---
 
 ## Current result — CIFAR-10, unconditional
