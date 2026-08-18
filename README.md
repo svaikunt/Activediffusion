@@ -19,18 +19,31 @@ two-variable SDE (or its probability-flow ODE).
 
 ## Current result — CIFAR-10, unconditional
 
-| model | FID | notes |
+All rows below are the **same architecture, optimizer, EMA, batch size, learning-rate
+schedule and training budget** — epoch 1000, batch 128, lr 2e-4 with 100k warmup. They
+differ only in the SDE and, for the two τ=0.5 rows, only in the loss weighting.
+
+| model | loss | FID |
 |---|---|---|
-| **active, conditional whitening** | **4.98** | τ=0.5, epoch 1000 |
-| active, original loss | 6.91 | same epoch, same sampler |
-| *published reference:* DDPM | 3.17 | |
-| *published reference:* CLD | 2.25 | ~2× the parameters, longer training |
+| **active, τ=0.5** | **conditional whitening** | **4.98** |
+| active, τ=0.5 | original (`√det M`) | 6.91 |
+| active, τ=0.15 | original (`√det M`) | 9.50 |
+| **passive baseline** | standard (`σ·score = −ε`) | **14.51** |
 
 Measured with `clean-fid` (`legacy_pytorch`) against the CIFAR-10 train split,
 N = 50,000, quadratic probability-flow sampler at 500 steps, Heun solver.
 
-The two active rows differ **only** in the loss weighting — same architecture, optimizer,
-EMA, batch size, schedule and SDE. See [`CIFAR10/whitening_note.pdf`](CIFAR10/whitening_note.pdf).
+**Active beats the passive baseline by 2.9× at matched training budget**, and roughly half
+of that advantage came from fixing the loss weighting rather than from the SDE itself —
+see [`CIFAR10/whitening_note.pdf`](CIFAR10/whitening_note.pdf).
+
+Two honest qualifications. The passive model is *disadvantaged* by this recipe: it prefers
+a larger effective batch, and its best result under any configuration is **13.65** (batch
+512, epoch 2200). Even against that best, active-with-conditional-whitening is 2.7× better.
+Conversely the active τ=0.15 row predates a numerics fix (see below) and is not
+reproducible from current code. For orientation against the literature, published
+unconditional CIFAR-10 FIDs are DDPM 3.17 and CLD 2.25, both at roughly twice the
+parameter count and far longer training than anything here.
 
 ---
 
