@@ -37,13 +37,16 @@ N = 50,000, quadratic probability-flow sampler at 500 steps, Heun solver.
 of that advantage came from fixing the loss weighting rather than from the SDE itself —
 see [`CIFAR10/whitening_note.pdf`](CIFAR10/whitening_note.pdf).
 
-Two honest qualifications. The passive model is *disadvantaged* by this recipe: it prefers
-a larger effective batch, and its best result under any configuration is **13.65** (batch
-512, epoch 2200). Even against that best, active-with-conditional-whitening is 2.7× better.
-Conversely the active τ=0.15 row predates a numerics fix (see below) and is not
-reproducible from current code. For orientation against the literature, published
-unconditional CIFAR-10 FIDs are DDPM 3.17 and CLD 2.25, both at roughly twice the
-parameter count and far longer training than anything here.
+Two honest qualifications. The passive model is *disadvantaged* by this recipe — it prefers
+a larger effective batch — and it also keeps improving past epoch 1000. Its best measured
+result at N = 50,000 is **13.96**, at epoch 1600 on a lower-learning-rate branch, i.e. a
+60% larger training budget than the table above. Even against that, active with
+conditional whitening is 2.8× better on 60% less training. Conversely, the active τ=0.15
+row predates a numerics fix (see below) and is not reproducible from current code.
+
+For orientation against the literature, published unconditional CIFAR-10 FIDs are DDPM
+3.17 and CLD 2.25 — both at roughly twice the parameter count and far longer training than
+anything here.
 
 ---
 
