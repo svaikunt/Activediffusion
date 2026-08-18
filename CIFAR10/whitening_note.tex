@@ -1,0 +1,379 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage[margin=1.2in]{geometry}
+\usepackage{booktabs}
+\usepackage{hyperref}
+
+\newcommand{\Tp}{T_p}
+\newcommand{\Ta}{T_a}
+\newcommand{\kk}{k}
+\newcommand{\tauu}{\tau}
+\newcommand{\dd}{\mathrm{d}}
+\newcommand{\Nor}{\mathcal{N}}
+\DeclareMathOperator{\Var}{Var}
+\DeclareMathOperator{\Cov}{Cov}
+
+\title{Whitening the Active Denoising Loss\\
+\large Why $\sqrt{\det M}$ was the wrong scale, and what replaced it}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+The passive diffusion loss is whitened: multiplying the score by $\sigma(t)$ gives a
+target of unit variance at every noise level. The active loss inherited a single scalar
+whitener, $\sqrt{\det M}$, applied to both the $x$ and $\eta$ channels. Because
+$\sqrt{\det M}=\sqrt{v_x}\sqrt{M_{22}}=\sqrt{v_\eta}\sqrt{M_{11}}$, this is the correct
+whitener for each channel multiplied by a spurious factor, and one scalar cannot whiten
+two channels of different scale. At $\tauu=0.5$ the $\eta$ target consequently varied by
+$515\times$ across $t$, collapsing to $0.0014$ at $t=10^{-3}$. Replacing $\sqrt{\det M}$
+with the per-channel conditional standard deviations $\sqrt{v_x},\sqrt{v_\eta}$ restores
+unit-variance targets at every $t$ and improves FID from $6.91$ to $4.98$ at matched
+epoch, sample count and sampler. We verify that the change leaves the minimiser --- and
+therefore the learned score --- untouched.
+\end{abstract}
+
+\section{The common framework}
+\label{sec:framework}
+
+All three losses in this codebase are weighted denoising score matching. Given a forward
+kernel $z_t\mid z_0 \sim \Nor(\mu_t, \Sigma_t)$ and noise $d = z_t-\mu_t$, the
+\emph{conditional} score is
+\begin{equation}
+s_{\text{true}} \;=\; \nabla_{z_t}\log p(z_t\mid z_0) \;=\; -\,\Sigma_t^{-1} d ,
+\label{eq:strue}
+\end{equation}
+and every loss has the form
+\begin{equation}
+\mathcal{L} \;=\; \mathbb{E}_{t,z_0,d}\Big[\,\lambda(t)\,\big(F - s_{\text{true}}\big)^{2}\Big],
+\qquad \lambda(t) > 0 .
+\label{eq:framework}
+\end{equation}
+Two facts follow, and the whole note turns on them.
+
+\begin{enumerate}\itemsep3pt
+\item \textbf{The minimiser does not depend on $\lambda$.} For any positive $\lambda$
+      depending only on $t$ (and channel), the minimiser of \eqref{eq:framework} is
+      $F^\star = \mathbb{E}[s_{\text{true}}\mid z_t] = \nabla\log p_t(z_t)$, the marginal
+      score. \emph{Changing the weighting cannot change what the network learns at
+      convergence.}
+\item \textbf{$\lambda$ decides everything else.} With finite capacity and finite
+      training, $\lambda$ determines how error is traded across $t$ and across channels.
+      A $\lambda$ that collapses at small $t$ tells the optimiser that small-$t$ errors are
+      free.
+\end{enumerate}
+
+The useful choice of $\lambda$ is the one that makes the \emph{target} $\lambda^{1/2}
+s_{\text{true}}$ have unit variance at every $t$ --- i.e.\ whitening. Then every noise
+level contributes equally, no region is silently discarded, and the loss is
+well-conditioned. This is what DDPM's $L_{\text{simple}}$ does, and it is the standard
+FID-optimal choice.
+
+\section{The passive loss: whitening done right}
+
+For the passive OU process $\dd x = -\kk x\,\dd t + \sqrt{2T_e}\,\dd W$ the kernel is
+scalar, $x_t = \mu_t + \sigma_t\varepsilon$ with $\varepsilon\sim\Nor(0,1)$. Then
+\begin{equation}
+s_{\text{true}} = -\frac{x_t-\mu_t}{\sigma_t^{2}} = -\frac{\varepsilon}{\sigma_t}
+\qquad\Longrightarrow\qquad
+\sigma_t\, s_{\text{true}} = -\varepsilon \sim \Nor(0,1) .
+\label{eq:passivewhiten}
+\end{equation}
+Multiplying by $\sigma_t$ produces a target of \emph{exactly} unit variance at every $t$.
+This is the entire content of ``$\sigma\cdot\text{score} = -\epsilon$''. The code
+(\texttt{train\_multigpu.py}) is:
+
+\begin{verbatim}
+noise = torch.randn_like(images)
+x_t, score, mean, std = model.forward(images, noise)
+true_score = -(x_t - mean) / (std ** 2)
+loss = torch.nn.functional.mse_loss(std * score, std * true_score)
+\end{verbatim}
+
+\noindent
+Here $\lambda(t)=\sigma_t^{2}$, the target is $-\varepsilon$, and the loss at zero output
+is exactly $1$ for all $t$. \textbf{The passive baseline was always whitened.} Only the
+active branch was not, which is why the two were never on comparable footing.
+
+\begin{quote}\small
+\textbf{Discrepancy worth recording.} The non-AMP branch of the same file weights by
+$\sigma^{2}$ rather than $\sigma$:
+\begin{verbatim}
+loss = torch.nn.functional.mse_loss((std ** 2) * score,
+                                    (std ** 2) * true_score)
+\end{verbatim}
+giving $\lambda=\sigma^{4}$ and a target of $-\sigma\varepsilon$, which is \emph{not}
+whitened. All reported runs used \texttt{--amp}, so the whitened branch is the one that
+executed and no result is affected; but the two branches should be made to agree.
+\end{quote}
+
+\section{The active kernel}
+
+For the active process the kernel is two-dimensional. With $d=(d_x,d_\eta)^{\!\top}$ and
+\begin{equation}
+M \;=\; \begin{pmatrix} M_{11} & M_{12}\\ M_{12} & M_{22}\end{pmatrix},
+\qquad \det M = M_{11}M_{22}-M_{12}^{2},
+\end{equation}
+equation \eqref{eq:strue} gives the two components explicitly:
+\begin{equation}
+s_x = -\,\frac{M_{22}d_x - M_{12}d_\eta}{\det M},
+\qquad
+s_\eta = -\,\frac{M_{11}d_\eta - M_{12}d_x}{\det M}.
+\label{eq:activescore}
+\end{equation}
+The question is what to multiply these by.
+
+\section{The original active loss: a single scalar whitener}
+
+\begin{sloppypar}
+The shipped implementation whitens both channels with the single scalar
+$\sqrt{\det M}$, in \texttt{model\_cifar10\_sde\_DDPM.py}, per RGB channel:
+\end{sloppypar}
+
+\begin{verbatim}
+det = M11 * M22 - M12 * M12
+det = torch.clamp(det, min=1e-8)
+
+for channel in range(3):
+    Feta = torch.sqrt(1 / det) * (
+        -M11 * (eta_ch - c * eta_0_ch)
+        + M12 * (rgb_ch - a * rgb_orig_ch - b * eta_0_ch))
+    Fx   = torch.sqrt(1 / det) * (
+        -M22 * (rgb_ch - a * rgb_orig_ch - b * eta_0_ch)
+        + M12 * (eta_ch - c * eta_0_ch))
+
+    scr_eta = torch.sqrt(det) * F_eta_ch
+    scr_x   = torch.sqrt(det) * F_rgb_ch
+
+    loss_eta_ch = torch.mean((scr_eta - Feta) ** 2)
+    loss_x_ch   = torch.mean((scr_x   - Fx)   ** 2)
+    total_loss += self.Ta * loss_eta_ch + self.Tp * loss_x_ch
+
+total_loss = total_loss / 3.0
+\end{verbatim}
+
+\noindent
+Reading off the structure: the residuals are $(d_x - a x_0 - b\eta_0)=d_x$ and
+$(\eta_t - c\eta_0)=d_\eta$, so \texttt{Feta}$\,=\sqrt{\det M}\,s_\eta$ and
+\texttt{Fx}$\,=\sqrt{\det M}\,s_x$ by \eqref{eq:activescore}. The loss is therefore
+\begin{equation}
+\mathcal{L}_{\text{score}}
+= \Ta\,\mathbb{E}\big[\det M\,(F_\eta - s_\eta)^{2}\big]
++ \Tp\,\mathbb{E}\big[\det M\,(F_x - s_x)^{2}\big],
+\qquad \lambda_\eta=\Ta\det M,\;\; \lambda_x=\Tp\det M .
+\label{eq:Lscore}
+\end{equation}
+
+\subsection{Why $\sqrt{\det M}$ is the wrong scale}
+
+Let $v_x$ and $v_\eta$ be the \emph{conditional} variances of the noise components,
+\begin{equation}
+v_x \;\equiv\; \Var(d_x \mid d_\eta) \;=\; M_{11}-\frac{M_{12}^{2}}{M_{22}} \;=\; \frac{\det M}{M_{22}},
+\qquad
+v_\eta \;\equiv\; \Var(d_\eta \mid d_x) \;=\; \frac{\det M}{M_{11}} .
+\label{eq:condvar}
+\end{equation}
+(Note these are variances of the \emph{noise increments}, not of the data $x$.) Rearranging
+\eqref{eq:condvar} gives the identity that explains everything:
+\begin{equation}
+\boxed{\;\sqrt{\det M} \;=\; \sqrt{v_x}\,\sqrt{M_{22}} \;=\; \sqrt{v_\eta}\,\sqrt{M_{11}}\;}
+\label{eq:identity}
+\end{equation}
+The same number factorises two different ways. In the $x$ channel it is the correct
+whitener $\sqrt{v_x}$ times a spurious $\sqrt{M_{22}}$; in the $\eta$ channel it is
+$\sqrt{v_\eta}$ times a spurious $\sqrt{M_{11}}$. A single scalar cannot whiten two
+channels whose natural scales differ.
+
+The consequence is a target whose scale swings wildly with $t$. Since
+$\Var(\sqrt{\det M}\,s_\eta)=M_{11}$ and $\Var(\sqrt{\det M}\,s_x)=M_{22}$ exactly
+(the $\det M$ cancels), the target standard deviations at $\tauu=0.5$, $\kk=4$,
+$\Ta=6.4$, $\Tp=10^{-3}$ are:
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{rccc}
+\toprule
+$t$ & $\eta$ target sd $=\sqrt{M_{11}}$ & $x$ target sd $=\sqrt{M_{22}}$ & \texttt{cond} (both)\\
+\midrule
+$0.001$ & $1.417\times10^{-3}$ & $2.261\times10^{-1}$ & $1$\\
+$0.010$ & $5.961\times10^{-3}$ & $7.084\times10^{-1}$ & $1$\\
+$0.050$ & $4.231\times10^{-2}$ & $1.523$              & $1$\\
+$0.100$ & $1.054\times10^{-1}$ & $2.054$              & $1$\\
+$0.500$ & $5.326\times10^{-1}$ & $3.327$              & $1$\\
+$1.000$ & $6.964\times10^{-1}$ & $3.545$              & $1$\\
+$2.000$ & $7.298\times10^{-1}$ & $3.577$              & $1$\\
+\midrule
+span & $\mathbf{515\times}$ & $15.8\times$ & $1\times$\\
+\bottomrule
+\end{tabular}
+\caption{Target scale under the original whitener. The $\eta$ target collapses by a factor
+of $515$ between $t=T$ and $t=10^{-3}$; squared, that is a $2.7\times10^{5}$ swing in the
+loss contribution. Small $t$ is effectively invisible to the optimiser.}
+\label{tab:scales}
+\end{table}
+
+Note that $\det M$ is not itself a mistake --- it is damage control. Dropping it entirely
+would leave a raw target of magnitude $\sim700$ under unit weight. The problem is
+specifically that one scalar is being asked to do two channels' work.
+
+\section{The replacement: per-channel conditional whitening}
+
+Whiten each channel by its own conditional standard deviation. The relevant
+one-dimensional formula is that the $i$-th score component is the regression residual of
+$d_i$ on $d_j$, divided by its conditional variance:
+\begin{equation}
+s_x = -\frac{d_x - (M_{12}/M_{22})\,d_\eta}{v_x},
+\qquad
+s_\eta = -\frac{d_\eta - (M_{12}/M_{11})\,d_x}{v_\eta}.
+\label{eq:condform}
+\end{equation}
+These are \emph{identical} to \eqref{eq:activescore} --- substitute $v_x=\det M/M_{22}$ and
+the $M_{22}$ cancels --- but written in a form where the natural whitener is manifest.
+Since $\Var\!\big(d_x - (M_{12}/M_{22})d_\eta\big)=v_x$, we have
+$\Var(\sqrt{v_x}\,s_x)=1$ at every $t$. The code (opt-in via
+\texttt{--score\_param cond}) is:
+
+\begin{verbatim}
+if self.score_param == "cond":
+    dx = noise[:, [0, 2, 4]]
+    de = noise[:, [1, 3, 5]]
+    M11 = M[:, 0, 0].view(-1, 1, 1, 1)
+    M12 = M[:, 0, 1].view(-1, 1, 1, 1)
+    M22 = M[:, 1, 1].view(-1, 1, 1, 1)
+    v_x = torch.clamp(M11 - M12*M12/M22, min=1e-20)  # Var(d_x | d_eta)
+    v_e = torch.clamp(M22 - M12*M12/M11, min=1e-20)  # Var(d_eta | d_x)
+    s_x_true = -(dx - (M12 / M22) * de) / v_x
+    s_e_true = -(de - (M12 / M11) * dx) / v_e
+    return (self.Tp * (v_x * (F_x - s_x_true) ** 2).mean()
+          + self.Ta * (v_e * (F_eta - s_e_true) ** 2).mean())
+\end{verbatim}
+
+\noindent
+so
+\begin{equation}
+\mathcal{L}_{\text{cond}}
+= \Ta\,\mathbb{E}\big[v_\eta\,(F_\eta - s_\eta)^{2}\big]
++ \Tp\,\mathbb{E}\big[v_x\,(F_x - s_x)^{2}\big],
+\qquad \lambda_\eta=\Ta v_\eta,\;\; \lambda_x=\Tp v_x .
+\label{eq:Lcond}
+\end{equation}
+This is the exact two-dimensional analogue of the passive $\sigma\cdot\text{score}=-\epsilon$.
+
+The network output is unchanged: it still emits the score. Only the loss weighting differs,
+so \texttt{\_score\_from\_output} is the identity in this mode and sampling is untouched.
+
+\subsection{What actually changed}
+
+Comparing \eqref{eq:Lscore} and \eqref{eq:Lcond}, the weight ratio is
+\begin{equation}
+\frac{\lambda^{\text{cond}}_\eta}{\lambda^{\text{score}}_\eta}
+= \frac{v_\eta}{\det M} = \frac{1}{M_{11}},
+\qquad
+\frac{\lambda^{\text{cond}}_x}{\lambda^{\text{score}}_x} = \frac{1}{M_{22}} .
+\end{equation}
+
+\begin{center}\small
+\begin{tabular}{lrrrrr}
+\toprule
+$t$ & $0.001$ & $0.01$ & $0.1$ & $1.0$ & $2.0$\\
+\midrule
+$\eta$ weight ratio $1/M_{11}$ & $4.98\times10^{5}$ & $2.81\times10^{4}$ & $90.0$ & $2.06$ & $1.88$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+A $2.65\times10^{5}$ swing, concentrated at small $t$ --- exactly the region the old
+whitener suppressed. Under \texttt{cond} every $t$ contributes equally; under
+\texttt{score} the loss was dominated almost entirely by large $t$.
+
+\subsection{Loss values are not comparable across parameterisations}
+
+At zero network output the loss equals the mean squared target, which is known in closed
+form and differs between the two:
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+objective & loss at zero output & measured\\
+\midrule
+\texttt{cond}    & $\Tp+\Ta = 6.401$ & $6.403$\\
+\texttt{score}   & $\Ta\,\mathbb{E}_t[M_{11}]+\Tp\,\mathbb{E}_t[M_{22}] = 2.504$ & $2.532$\\
+passive          & $1$ & ---\\
+\bottomrule
+\end{tabular}
+\end{center}
+A raw \texttt{cond} loss of $0.55$ and a raw \texttt{score} loss of $0.068$ are therefore
+$8.6\%$ and $2.7\%$ of target variance unexplained --- a ratio of $3$, not the $8$ the raw
+numbers suggest. Compare only the normalised quantity $\mathcal{L}/\mathcal{L}_0$, and even
+then remember that the two are fitting differently weighted targets. Training loss is in
+any case a poor progress signal here: it saturates within $\sim50$ epochs while FID
+continues to improve for thousands.
+
+\section{Verification}
+
+\begin{sloppypar}
+Both objectives were checked against the shipped classes
+(\texttt{redteam\_cond.py}, \texttt{redteam\_cond\_weights.py}).
+\end{sloppypar}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+check & result\\
+\midrule
+\texttt{cond} target vs $-\Sigma^{-1}d$, $x$ channel & $\max|\Delta|/\text{RMS} = 5.9\times10^{-15}$\\
+\texttt{cond} target vs $-\Sigma^{-1}d$, $\eta$ channel & $3.0\times10^{-15}$\\
+$\mathcal{L}_{\text{score}}$ evaluated at the exact score & $2.8\times10^{-14}$\\
+$\mathcal{L}_{\text{cond}}$ evaluated at the exact score & $1.2\times10^{-13}$\\
+\texttt{\_score\_from\_output}, both modes & bit-for-bit identity\\
+$v_x$ in \texttt{float32} vs \texttt{float64} & $4.5\times10^{-7}$\\
+original \texttt{score} branch vs pre-change commit & no deletions\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Both losses vanish at the same $F$, confirming the general argument of
+Section~\ref{sec:framework}: the minimiser is unchanged, so the network converges to the same
+score function and the forward dynamics are untouched. Only the finite-capacity,
+finite-training trade-off moved.
+
+The subtraction in $v_x = M_{11}-M_{12}^{2}/M_{22}$ was the expected numerical weak point,
+given that the covariance itself required Van Loan's method for exactly this reason. It is
+safe here: the $x$--$\eta$ correlation peaks at $0.854$, well away from $1$, so
+$M_{12}^{2}/M_{22}$ never approaches $M_{11}$.
+
+\section{Result}
+
+Two arms at $\tauu=0.5$, identical in architecture, optimiser, EMA, batch size, schedule
+and numerics, differing only in \texttt{--score\_param}:
+
+\begin{center}
+\begin{tabular}{llrr}
+\toprule
+epoch & measurement & \texttt{cond} & \texttt{score}\\
+\midrule
+$800$  & $N=10{,}000$, quadratic PF-300 & $\mathbf{7.71}$ & $9.70$\\
+$800$  & $N=50{,}000$, quadratic PF-500 & $\mathbf{5.67}$ & ---\\
+$1000$ & $N=50{,}000$, quadratic PF-500 & $\mathbf{4.98}$ & $6.91$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+A $28\%$ FID reduction at matched epoch, sample count and sampler. The improvement is
+also faster, not merely offset: over $800\to1000$ the \texttt{cond} ratio is $0.878$
+against $0.917$ for \texttt{score}, and every other per-$200$-epoch ratio recorded in this
+project lies in $0.90$--$0.97$.
+
+\section{Caveat}
+
+Equal weighting buys accuracy at small $t$, and FID is precisely the metric that rewards
+small-$t$ fidelity. Nothing here establishes that \texttt{cond} is superior on likelihood:
+the variance-weighted objective \eqref{eq:Lscore} is closer in spirit to the ELBO, and the
+literature consistently finds that $L_{\text{simple}}$-style whitening improves FID while
+\emph{degrading} NLL relative to likelihood weighting. The claim supported by these
+measurements is a FID claim, and the weighting should be stated explicitly alongside it.
+
+\end{document}

@@ -28,3 +28,15 @@ __pycache__/
 # os / misc
 .DS_Store
 *.pkg
+
+# third-party papers — not ours to redistribute
+NvidiaCLS.pdf
+CLDNvidiapdf
+*/NvidiaCLS.pdf
+*/CLDNvidiapdf
+
+# scratch
+Untitled
+
+# local staging area for cluster pulls
+DownloadsFromCluster/

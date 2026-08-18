@@ -1,0 +1,248 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage[margin=1.2in]{geometry}
+\usepackage{hyperref}
+
+\newcommand{\Tp}{T_p}
+\newcommand{\Ta}{T_a}
+\newcommand{\Te}{T_e}
+\newcommand{\kk}{k}
+\newcommand{\tauu}{\tau}
+\renewcommand{\det}{\mathrm{det}}
+\newcommand{\Cov}{\mathrm{Cov}}
+
+\title{Loss Functions for Active and Passive Diffusion:\\
+Comparison with CLD and the $\tauu\to 0$ Limit}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Setup}
+
+We consider two coupled stochastic variables: image pixels $x$ and active noise $\eta$,
+evolving under the forward SDEs
+\begin{align}
+dx &= (-\kk x + \eta)\,dt + \sqrt{2\Tp}\,dW_x, \label{eq:sde_x}\\
+d\eta &= -\frac{\eta}{\tauu}\,dt + \sqrt{\frac{2\Ta}{\tauu^2}}\,dW_\eta, \label{eq:sde_eta}
+\end{align}
+with $\Tp = 10^{-3}$, $\Ta = 1$, and persistence time $\tauu$.
+The passive baseline is the single-variable OU process
+\begin{equation}
+dx = -\kk x\,dt + \sqrt{2\Te}\,dW_x.
+\end{equation}
+
+\section{Marginal Distribution and the $\tauu\to 0$ Limit}
+
+The joint process $(x_t, \eta_t)$ given $(x_0, \eta_0)$ is Gaussian with means
+\begin{equation}
+\mu_x = e^{-\kk t} x_0 + b\,\eta_0, \qquad
+\mu_\eta = e^{-t/\tauu}\,\eta_0,
+\end{equation}
+where $b = (e^{-t/\tauu} - e^{-\kk t})/(\kk - 1/\tauu) \to 0$ as $\tauu\to 0$,
+and covariance matrix $\Sigma = \bigl[\begin{smallmatrix} M_{11} & M_{12} \\ M_{12} & M_{22} \end{smallmatrix}\bigr]$ with
+\begin{equation}
+M_{11} \xrightarrow{\tauu\to 0} \frac{\Tp + \Ta}{\kk}(1 - e^{-2\kk t}), \qquad
+M_{12} \xrightarrow{\tauu\to 0} \Ta, \qquad
+M_{22} = \frac{\Ta}{\tauu} \to \infty.
+\end{equation}
+The marginal variance of $x_t$ therefore tends to $(\Tp+\Ta)/\kk\,(1-e^{-2\kk t})$,
+which matches the passive model with $\Te = \Tp + \Ta$.
+In particular, when $\Tp\to 0$ and $\Ta = \Te$, the marginal distribution of $x_t$ is
+identical to the passive model with temperature $\Te$.
+
+\section{Score-Matching Loss Functions}
+
+\subsection{Passive loss}
+
+The passive model uses true score $\nabla_x \log p_t(x_t) = -(x_t - \mu_x)/M_{11}$
+where $M_{11} = (T_e/k)(1 - e^{-2kt})$.
+The loss is implemented via \texttt{mse\_loss} with two variants depending on GPU mode:
+\begin{align}
+\mathcal{L}_{\text{passive}}^{\text{AMP}} &= M_{11} \cdot \bigl(F_x - \nabla_x \log p_t\bigr)^2,
+\label{eq:passive_amp}\\
+\mathcal{L}_{\text{passive}}^{\text{non-AMP}} &= M_{11}^2 \cdot \bigl(F_x - \nabla_x \log p_t\bigr)^2.
+\label{eq:passive_noamp}
+\end{align}
+These arise from \texttt{mse\_loss($\sigma F_x$,\; $\sigma \nabla_x \log p_t$)}
+and \texttt{mse\_loss($\sigma^2 F_x$,\; $\sigma^2 \nabla_x \log p_t$)} respectively,
+with $\sigma^2 = M_{11}$.
+
+\paragraph{CLD passive (VPSDE).}
+CLD's passive baseline uses variance-preserving noise schedule $\beta(t)$,
+with $M_{11} = 1 - e^{-\int_0^t \beta(s)\,ds}$ and loss
+\begin{equation}
+\mathcal{L}_{\text{CLD-passive}} = \tfrac{1}{2}\beta(t) \cdot M_{11}
+\cdot \bigl(F_x - \nabla_x \log p_t\bigr)^2.
+\label{eq:cld_passive}
+\end{equation}
+This follows from \texttt{(score / noise\_multiplier $-\,\varepsilon)^2 \times$ multiplier}
+with noise\_multiplier $= -1/\sigma$ and multiplier $= \beta(t)/2$.
+
+\paragraph{Comparison.}
+Equations~\eqref{eq:passive_amp} and~\eqref{eq:cld_passive} have the same $M_{11}$
+weighting; the only difference is the extra $\tfrac{1}{2}\beta(t)$ factor in CLD, which
+reflects its time-varying noise schedule (in the user's model $\beta$ is constant, so
+this is just a fixed prefactor absorbed into the learning rate).
+Equation~\eqref{eq:passive_noamp} carries an additional $M_{11}$ factor; since
+$M_{11} \in (0, T_e/k]$ is bounded and $\mathcal{O}(1)$, this changes the relative
+emphasis across diffusion times but not the minimizer.
+
+\subsection{Active loss (joint score matching)}
+The active model learns the full joint score
+$\nabla_{(x,\eta)}\log p_t(x_t,\eta_t) = -\Sigma^{-1}(x_t - \mu_x, \eta_t - \mu_\eta)^\top$:
+\begin{equation}
+\mathcal{L}_{\text{active}} =
+\Tp \cdot \det\Sigma \cdot \bigl(F_x - \nabla_x \log p_t\bigr)^2
++\Ta \cdot \det\Sigma \cdot \bigl(F_\eta - \nabla_\eta \log p_t\bigr)^2,
+\label{eq:active_loss}
+\end{equation}
+where
+\begin{align}
+\nabla_x \log p_t &= \frac{-M_{22}(x_t - \mu_x) + M_{12}(\eta_t - \mu_\eta)}{\det\Sigma},
+\label{eq:x_score}\\
+\nabla_\eta \log p_t &= \frac{-M_{11}(\eta_t - \mu_\eta) + M_{12}(x_t - \mu_x)}{\det\Sigma}.
+\label{eq:eta_score}
+\end{align}
+In practice, the loss is implemented by introducing
+$\mathbf{F}_x = \sqrt{\det\Sigma}\,F_x$ and $\mathbf{F}_\eta = \sqrt{\det\Sigma}\,F_\eta$,
+so that the targets become $\mathcal{O}(1)$ quantities independent of $\tauu$.
+
+\subsection{CLD loss (conditional score matching)}
+
+Critically-Damped Langevin Diffusion \cite{dockhorn2022cld} augments data $x$ with a
+velocity variable $v$ and trains only the conditional score $\nabla_v \log p_t(v_t\mid x_t)$:
+\begin{equation}
+\mathcal{L}_{\text{CLD}} = \beta(t)\,f \cdot \frac{\det\Sigma}{M_{11}} \cdot
+\bigl(F_v - \nabla_v \log p_t\bigr)^2,
+\end{equation}
+where $\det\Sigma/M_{11} = \mathrm{Var}(v_t\mid x_t)$ is the conditional variance of $v$
+given $x$.  Since $\nabla_v \log p(x,v) = \nabla_v \log p(v\mid x)$ (as $p(x)$ does not
+depend on $v$), the joint and conditional $v$-scores coincide, so CLD needs no separate
+$x$-score term.  The weighting $\det/M_{11}$ (conditional variance) is more natural than
+the joint determinant $\det$ used in~\eqref{eq:active_loss}; the ratio is the
+bounded, $\mathcal{O}(1)$ quantity $M_{11}$.
+
+\section{Behavior of the Active Loss as $\tauu\to 0$}
+
+As $\tauu\to 0$ with $\Tp = 10^{-3}$, $\Ta = 1$ fixed, we have
+$\det\Sigma \approx M_{11}\cdot\Ta/\tauu$.
+
+\paragraph{$x$-score term.}
+\begin{equation}
+\Tp\cdot\det\Sigma \;\approx\; \frac{\Tp\,\Ta\,M_{11}}{\tauu}
+\;=\; \frac{\Tp}{\tauu}\times \Ta\,M_{11}.
+\end{equation}
+Since $\nabla_x\log p_t\to$ (passive score with $\Te=\Tp+\Ta$), this term becomes
+$(\Tp/\tauu)$ times the passive loss---an infinitely amplified version of the passive
+score-matching objective.  The model $F_x$ is therefore driven strongly to the passive
+score for any $\Tp > 0$, no matter how small.
+
+\paragraph{$\eta$-score term and $x$-information.}
+The target for $F_\eta$ contains an $x$-dependent coupling:
+\begin{equation}
+\nabla_\eta \log p_t \;\approx\;
+-\frac{({\eta_t - \mu_\eta})}{\Ta/\tauu}
++\underbrace{\frac{\tauu\,(x_t - \mu_x)}{M_{11}}}_{\to\,0}.
+\label{eq:eta_score_approx}
+\end{equation}
+The coupling term vanishes as $\tauu\to 0$, yet the loss gradient for it is
+\begin{equation}
+\Ta\cdot\det\Sigma\cdot\frac{\tauu}{M_{11}}
+\;\approx\;
+\Ta\cdot M_{11}\cdot\frac{\Ta}{\tauu}\cdot\frac{\tauu}{M_{11}} = \Ta^2 = \mathcal{O}(1).
+\end{equation}
+The det$\,\Sigma\to\infty$ weighting exactly compensates the $\tauu\to 0$ shrinkage of the
+coupling, keeping the gradient signal finite and well-conditioned at all $\tauu$.
+
+\section{Adiabatic Elimination: Active Score Reduces to Passive}
+
+The reverse-time SDE for $\eta$ (running backward from $T$ to $0$) is
+\begin{equation}
+d\eta_{\rm rev} = \left[\frac{\eta}{\tauu}
++ \frac{2\Ta}{\tauu^2}\nabla_\eta\log p_t\right]ds + \sqrt{\frac{2\Ta}{\tauu^2}}\,d\bar W.
+\label{eq:rev_sde_eta}
+\end{equation}
+Setting the mean drift to zero defines the quasi-stationary point $\eta^*$:
+\begin{equation}
+\frac{\eta^*}{\tauu} + \frac{2\Ta}{\tauu^2}\,\nabla_\eta\log p_t(x,\eta^*) = 0
+\quad\Longrightarrow\quad
+\nabla_\eta\log p_t(x,\eta^*) = -\frac{\tauu\,\eta^*}{2\Ta}.
+\label{eq:qs_cond}
+\end{equation}
+We now substitute the \emph{exact} score formula \eqref{eq:eta_score} into \eqref{eq:qs_cond},
+with $\mu_\eta\approx 0$:
+\begin{equation}
+\frac{-M_{11}\,\eta^* + M_{12}(x-\mu_x)}{\det\Sigma}
+= -\frac{\tauu\,\eta^*}{2\Ta}.
+\end{equation}
+Multiplying through by $\det\Sigma$ and using $\det\Sigma = M_{11}M_{22} - M_{12}^2$
+with the \emph{exact} fluctuation--dissipation relation $M_{22} = \Ta/\tauu$:
+\begin{equation}
+\tauu\,\frac{\det\Sigma}{2\Ta}
+= \tauu\,\frac{M_{11}M_{22}-M_{12}^2}{2\Ta}
+= \frac{M_{11}}{2} - \frac{\tauu\,M_{12}^2}{2\Ta}.
+\end{equation}
+Collecting the $\eta^*$ terms gives
+\begin{equation}
+M_{12}(x-\mu_x)
+= \eta^*\!\left(M_{11} - \frac{M_{11}}{2} + \frac{\tauu\,M_{12}^2}{2\Ta}\right)
+= \eta^*\,\frac{T_a M_{11} + \tauu\,M_{12}^2}{2\Ta},
+\end{equation}
+and therefore
+\begin{equation}
+\boxed{\eta^* = \frac{2\Ta\,M_{12}\,(x-\mu_x)}{\Ta\,M_{11} + \tauu\,M_{12}^2}}.
+\label{eq:eta_star}
+\end{equation}
+
+\paragraph{Closing the loop: substitute $\eta^*$ into the $x$-score \eqref{eq:x_score}.}
+With $\mu_\eta\approx 0$:
+\begin{align}
+\nabla_x\log p_t\big|_{\eta=\eta^*}
+&= \frac{-M_{22}(x-\mu_x) + M_{12}\,\eta^*}{\det\Sigma}
+= \frac{(x-\mu_x)}{\det\Sigma}
+\left[-M_{22} + \frac{2\Ta\,M_{12}^2}{\Ta\,M_{11}+\tauu\,M_{12}^2}\right].
+\notag
+\end{align}
+Combining the bracket over a common denominator and using $M_{11}M_{22}=\det\Sigma+M_{12}^2$:
+\begin{align}
+-M_{22}(\Ta M_{11}+\tauu M_{12}^2)+2\Ta M_{12}^2
+&= -\Ta M_{11}M_{22} - \tauu M_{22}M_{12}^2 + 2\Ta M_{12}^2
+\notag\\
+&= -\Ta(\det\Sigma+M_{12}^2) + M_{12}^2(\underbrace{2\Ta - \tauu M_{22}}_{=\,\Ta,\;\text{since } M_{22}=\Ta/\tauu})
+\notag\\
+&= -\Ta\,\det\Sigma.
+\label{eq:cancel}
+\end{align}
+The cancellation $2\Ta - \tauu M_{22} = \Ta$ (using $M_{22}=\Ta/\tauu$ \emph{exactly}) is key.
+Substituting back:
+\begin{equation}
+\nabla_x\log p_t\big|_{\eta=\eta^*}
+= -\frac{\Ta\,(x-\mu_x)}{\Ta\,M_{11} + \tauu\,M_{12}^2}
+\;\xrightarrow{\tauu\to 0}\; -\frac{x-\mu_x}{M_{11}}.
+\label{eq:x_score_passive}
+\end{equation}
+Since $M_{11}\to(\Tp+\Ta)/\kk\,(1-e^{-2\kk t})=(\Te/\kk)(1-e^{-2\kk t})$ as $\tauu\to 0$,
+this is exactly the passive score for temperature $\Te=\Tp+\Ta$, valid for any $\Tp\geq 0$
+including $\Tp=0$.
+
+\medskip
+\noindent\textbf{Conclusion.}
+Using the exact $\eta$-score \eqref{eq:eta_score} in the quasi-stationary condition
+\eqref{eq:qs_cond} yields $\eta^*$~\eqref{eq:eta_star}, and substituting into
+\eqref{eq:x_score} recovers the passive score \eqref{eq:x_score_passive} via the
+exact cancellation \eqref{eq:cancel} (which follows from the fluctuation--dissipation
+relation $M_{22}=\Ta/\tauu$).  The $\det\Sigma$ weighting in the active loss keeps
+the gradient for the $x$-coupling in $F_\eta$ at $\mathcal{O}(\Ta^2)=\mathcal{O}(1)$
+for all $\tauu$, ensuring the network learns $\nabla_\eta\log p_t$ accurately and
+the passive limit is recovered.
+
+\begin{thebibliography}{1}
+\bibitem{dockhorn2022cld}
+T.~Dockhorn, A.~Vahdat, and K.~Kreis,
+\textit{Score-Based Generative Modeling with Critically-Damped Langevin Diffusion},
+ICLR 2022.
+\end{thebibliography}
+
+\end{document}

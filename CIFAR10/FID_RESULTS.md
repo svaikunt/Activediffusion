@@ -1021,6 +1021,212 @@ alone — 11.68 / 13.88 / 8.89 at τ = 0.2 / 0.25 / 0.5 — establish the kink o
 numerics on both sides. The critical-damping point is anomalously *bad*. Worth confirming
 at a second epoch before treating it as physics.
 
+### 1.9 `score_param=cond` — conditional whitening (in progress)
+
+`/net/scratch/svaikunt/cifar10/active_cld_tau05_cond/`, job 1383805. Identical to the
+τ=0.5 arm of §1.8a in every respect except `--score_param cond`, so it is a clean A/B
+against **8.89** (N=10k, PF-300) and **6.91** (N=50k, quadratic PF-500) at epoch 1000.
+
+Motivation in §5: the original loss whitens both channels with the single scalar
+`√det`, but `√det = √v_η·√M11 = √v_x·√M22` — the correct whitener times a spurious
+`√M_jj`. That drives the η target from 0.73 at t=T down to 0.0014 at t=1e-3 (520×) at
+τ=0.5. `cond` whitens each channel by its own conditional variance
+`v_i = Var(d_i | d_j) = det/M_jj`, giving unit-variance targets at every t.
+
+The earlier job 1383554 died immediately — `TypeError: unexpected keyword argument
+'score_param'`, from deploying the patched `model_cifar10_sde_DDPM.py` without
+`model_cifar10_sde_DDPM_v2.py`. Both files must ship together.
+
+#### Epoch 200 — sanity gate passed
+
+Sample grids (`samples_epoch_200_pf.png`, `_large.png`, both in
+`DownloadsFromCluster/tau05cond/`) show coherent objects under both samplers: correct
+global structure, plausible colour statistics, **no high-frequency mush**. That was the
+specific failure mode to watch for — if the reweighting had broken small-t accuracy it
+would be visible here. It isn't. No FID yet; there is no epoch-200 baseline for the
+score-mode arm to compare against.
+
+#### ⚠ Do not compare `cond` loss values to `score` loss values
+
+The two objectives have different losses at zero network output, so raw curves sit at
+different heights for reasons unrelated to model quality:
+
+| objective | loss at init | why |
+|-----------|--------------|-----|
+| `cond`     | `Tp + Ta` = **6.401** | targets are unit-variance at every t, by construction |
+| `whitened` | **2** | `r ~ N(0, I)` at every t |
+| `score`    | `Ta·E_t[M11] + Tp·E_t[M22]` = **2.504** | targets collapse as t → 0 |
+| passive    | **1** | `σ·score = −ε` |
+
+(`Var(Feta) = M11` and `Var(Fx) = M22` exactly — the `√det` cancels.) Divide by these to
+get the *fraction of target variance unexplained*, which IS comparable. `cond` at 0.552
+is 8.6% unexplained; `score` at 0.068 is 2.7%. So the raw 8× ratio is really ~3×, and
+even that is not a quality statement — the two are fitting differently-weighted targets.
+[`plot_loss.py`](plot_loss.py) parses the `ARGS:` banner out of a log, computes the right
+init loss per objective, and plots both panels.
+
+#### The loss is flat after ~epoch 50, and this is expected
+
+| epoch | 25 | 50 | 100 | 150 | 200 | 217 |
+|-------|----|----|-----|-----|-----|-----|
+| loss  | 0.635 | 0.582 | 0.563 | 0.552 | 0.548 | 0.552 |
+
+Slope over epochs 100–217 is **−0.007 per 100 epochs**, only 1.96× the epoch-to-epoch
+scatter (0.0042); over 150–217 alone it is 0.64× scatter, i.e. indistinguishable from
+flat. DSM loss saturates near its irreducible floor within ~50 epochs and then stops
+tracking sample quality — §1.1 is the proof, where FID went 21.58 → 12.34 between epochs
+1000 and 2600 with a static loss. **Never use training loss as a progress signal here.**
+
+Note also that at epoch 217 the run is at 84,630 of 100,000 warmup steps — lr has not
+yet reached 2e-4, which happens at epoch 256. Some of the flatness is that.
+
+#### Epoch 800 A/B — **cond wins by 1.99** (job 1399066)
+
+N = 10,000, quadratic PF-300, Heun, single H200, both arms scored in the same job from
+`fidab1.sh` so sampler and eval are byte-identical.
+
+| run | epoch | FID @10k, PF-300 |
+|-----|-------|------------------|
+| **τ=0.5 `cond`** | **800** | **7.71** |
+| τ=0.5 `score` | 800 | 9.70 |
+| τ=0.5 `score` | 1000 | 8.89 (§1.8a) |
+
+**delta (cond − score) at epoch 800 = −1.99.** Two independent readings, both favourable:
+
+1. The matched-epoch gap is 1.99, roughly 4× the N=10k noise floor (~0.5, measured by
+   re-drawing the same checkpoint: 15.63 vs 15.09).
+2. `cond` at epoch **800** beats `score` at epoch **1000** by 1.18 — better quality from
+   200 fewer epochs, which no sampler or scoring artifact explains.
+
+`score` traces 9.70 → 8.89 over epochs 800 → 1000 (−0.81 per 200). If `cond` holds that
+slope it lands near **6.9 at epoch 1000** on this scale.
+
+> ⚠ Not yet comparable to the 6.91 headline — that is N=50,000 at quadratic PF-500. The
+> comparable score-mode figure here is **8.89**. For the headline, rerun as
+> `sbatch fidab1.sh 1000 50000 500`, which is ~5× the sampling (~95 min/arm on one H200 —
+> worth 4 GPUs).
+
+**Still to confirm:** §1.8b showed early τ gaps were largely convergence-rate effects that
+collapsed by epoch 1000 (the 0.1-vs-0.2 gap went 12.22 → 1.20). Epoch 1000 is the check.
+
+#### Epoch 800 headline — **PROJECT BEST: FID 5.67 @ N=50,000** (job 1409276)
+
+N = 50,000, quadratic PF-500, Heun, 4×H200 (4 × 12,500 merged). Same configuration as
+§1.2's 7.91 and §1.8a's 6.91, so directly comparable.
+
+| run | epoch | steps | images | FID@50k |
+|-----|-------|-------|--------|---------|
+| **τ=0.5 `cond`** | **800** | **312k** | **40M** | **5.67** |
+| τ=0.5 `score` (§1.8a) | 1000 | 390k | 50M | 6.91 |
+| τ=0.40 pre-patch (§1.8) | 1200 | 468k | 60M | 7.31 |
+| old 2-GPU run (§1.2) | 2200 | 404k | 103M | 7.91 |
+
+**Beats the previous best by 1.24 FID on 20% fewer optimizer steps and 20% less data**,
+and the run was still training when measured. Gap to CLD's 2.25 narrows from ~3× to 2.5×;
+still 1.8× off plain DDPM's 3.17.
+
+This is the first result attributable to the loss fix rather than to τ: `cond` and `score`
+differ only in `--score_param`, share τ=0.5 and every other hyperparameter, and both were
+trained on post-patch Van Loan numerics.
+
+**Corroborated at two scales.** The 10k/PF-300 A/B gave cond 7.71 vs score 9.70 at the
+same epoch, so the advantage is not a sampler or sample-count artifact.
+
+**Not yet done:** the matched-epoch 50k point at 800. `score` at 800/50k was never sampled
+(the job was cancelled to prioritise epoch 1000), so 5.67-vs-6.91 compares different
+epochs. Superseded by the epoch-1000 result below, which is matched.
+
+#### Epoch 1000 — **PROJECT BEST: FID 4.98**, and the matched comparison
+
+N = 50,000, quadratic PF-500, 4×H200. Same epoch, same N, same sampler as §1.8a's 6.91 —
+the arms differ **only** in `--score_param`.
+
+| τ=0.5, epoch 1000, 50k, quad PF-500 | FID |
+|-------------------------------------|-----|
+| **`cond`** | **4.98** |
+| `score` | 6.91 |
+| **delta** | **−1.93 (−28%)** |
+
+**The loss fix changes the convergence rate, not just the offset.** Over 800 → 1000:
+
+| arm | 800 | 1000 | ratio |
+|-----|-----|------|-------|
+| `cond` (50k) | 5.67 | 4.98 | **0.878** |
+| `score` (10k/PF-300) | 9.70 | 8.89 | 0.917 |
+
+A pure offset would have given 5.67 × 0.917 = 5.20; the measured 4.98 is below that. Every
+other per-200-epoch ratio in this project sits at 0.90–0.97 (§1.1), so 0.878 is the
+fastest interval recorded here.
+
+Projecting cond's own rate forward — one interval only, and deceleration is universal, so
+treat as an upper bound on progress: 1200 → 4.37, 1400 → 3.84, 1600 → 3.37.
+
+**Against published unconditional CIFAR-10:** EDM 1.97 · NCSN++ 2.20 · CLD 2.25 ·
+DDPM 3.17 · DDIM-100 4.04 · **this 4.98** · NCSNv2 10.87. Gap to CLD is now 2.2×, down
+from ~3×. Note CLD used NCSN++ at roughly twice the parameters with FIR resampling and far
+longer training, so part of the remaining gap is capacity and compute rather than the SDE.
+
+#### 1.9a Red team — does `cond` change the dynamics?
+
+Run [`redteam_cond.py`](redteam_cond.py) and [`redteam_cond_weights.py`](redteam_cond_weights.py)
+against the real classes. **Verdict: the target is unchanged; only the weighting moved.**
+
+| check | result |
+|-------|--------|
+| cond target vs `−Σ⁻¹d`, x | max\|diff\|/RMS = **5.9e-15** |
+| cond target vs `−Σ⁻¹d`, η | **3.0e-15** |
+| `score` loss at the exact score | **2.8e-14** |
+| `cond` loss at the exact score | **1.2e-13** |
+| loss at zero output | 2.532 / 6.403 (predicted 2.504 / 6.401) |
+| `_score_from_output` identity, both modes | bit-for-bit |
+| `v_x` float32 vs float64 | 4.5e-7 |
+| original `score` branch vs pre-`score_param` commit | no deletions |
+
+**Why the targets coincide.** `v_x = M11 − M12²/M22 = det/M22`, so
+`s_x = −(d_x − (M12/M22)d_η)/v_x = −(M22·d_x − M12·d_η)/det`, which is exactly the
+x-component of `−Σ⁻¹d`. Same for η with `M11`. Both losses are
+`E[w(t)·(F − s_true)²]` with `w > 0` depending only on t and channel, so both are minimised
+by `E[s_true | x_t, η_t]` — the same function. The network converges to the same score.
+
+**No cancellation hazard.** `v_x` is a difference, so it was the expected weak point given
+the τ=0.2 Cholesky failure (§5). It is safe: the x–η correlation peaks at **0.854**, far
+from 1, so `M12²/M22` never approaches `M11`.
+
+**What changed** — the per-t weight, by `1/M_jj`:
+
+| t | 0.001 | 0.01 | 0.1 | 1.0 | 2.0 |
+|---|-------|------|-----|-----|-----|
+| η weight ratio cond/score = 1/M11 | 4.98e5 | 2.81e4 | 90.0 | 2.06 | 1.88 |
+
+A **2.65e5×** swing across t, concentrated on small t — precisely where `√det` was
+suppressing the signal. `cond` gives every t unit-variance targets, i.e. the active
+analogue of DDPM's `L_simple`, the standard FID-optimal weighting.
+
+> ⚠ **Do not claim a uniform improvement.** Equal weighting buys small-t accuracy and FID
+> rewards exactly that. Nothing here shows `cond` is better on likelihood/NLL, where the
+> variance-weighted objective is closer to the ELBO and may well win. Report the FID claim
+> and state the weighting explicitly.
+
+**Note:** the loss is computed inside `torch.autocast(bfloat16)` (train_multigpu.py:295).
+Pointwise ops keep their input dtype, and `compute_covariance` builds in float64 before
+casting to t's float32, so `v_x` is not evaluated in bf16. Verified numerically above.
+
+#### Practical notes
+
+- **`num_workers=0` is catastrophic for the 50k FID.** 10k folders scored at 4.6–15 it/s,
+  but 50k dropped to **0.17 it/s** (5.91 s/it, ETA 2.5 h) — NFS attribute-cache thrashing
+  on a large directory, not compute. `num_workers=8` restored 2.12 it/s (~12 min). Use 8
+  everywhere; `TMPDIR` on scratch already handles the `/tmp`-full problem that originally
+  motivated 0.
+- **Node p003 is wedged.** It accepts jobs, marks them RUNNING, and never executes them
+  (two occurrences: 1398612, 1404162; also gave `srun` socket timeouts and sat in
+  `completing`). Submit with `--exclude=p003`.
+- **The run TIMEOUTed at 9 h**, losing epochs 800→~978. At 32.7 s/epoch, 800→2000 needs
+  ~11 h. `resume_cond.sh` uses a 12 h limit and `--save_freq 100`.
+
+**Next:** `sbatch --exclude=p003 ~/fidone.sh 1000 50000 500 cond` for the matched-epoch
+comparison against 6.91; optionally `... 800 50000 500 score` to complete the 800 row.
+
 ### 1.8 τ sweep — **best result: τ=0.4, FID 7.31 @ N=50,000 — but see the caveat**
 
 > ⚠ **The τ=0.4 arm was trained BEFORE the Van Loan numerics patch (§5).** At τ=0.4,

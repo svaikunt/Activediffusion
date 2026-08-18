@@ -1,0 +1,358 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage[margin=1.2in]{geometry}
+\usepackage{booktabs}
+\usepackage{hyperref}
+
+\newcommand{\Tp}{T_p}
+\newcommand{\Ta}{T_a}
+\newcommand{\kk}{k}
+\newcommand{\tauu}{\tau}
+\newcommand{\dd}{\mathrm{d}}
+\DeclareMathOperator{\Cov}{Cov}
+\DeclareMathOperator{\diag}{diag}
+
+\title{Van Loan's Method for the Active-Diffusion Covariance\\
+\large Why the transition covariance is a block of a matrix exponential,\\
+and why the closed form had to go}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+The forward process of the active diffusion model requires the transition covariance
+$M(t)=\int_0^t e^{As}Qe^{A^{\!\top}\!s}\,\dd s$. This note derives Van Loan's identity,
+which obtains $M(t)$ as an off-diagonal block of a single $4\times4$ matrix exponential,
+explains why the previously used hand-derived closed form failed --- catastrophically at
+$\kk\tauu=1$ and by up to $241\%$ at small $t$ elsewhere --- and records the numerical
+verification. The essential observation is that $M(t)$ never was an integral that needed
+evaluating: it is the solution of a linear ODE, and augmenting the state absorbs the
+forcing term into a homogeneous system whose solution is an exponential.
+\end{abstract}
+
+\section{The quantity we need}
+
+The active model evolves image pixels $x$ coupled to a persistent noise $\eta$,
+\begin{align}
+\dd x    &= (-\kk x + \eta)\,\dd t + \sqrt{2\Tp}\,\dd W_x, \label{eq:sdex}\\
+\dd \eta &= -\frac{\eta}{\tauu}\,\dd t + \frac{\sqrt{2\Ta}}{\tauu}\,\dd W_\eta,
+\label{eq:sdeeta}
+\end{align}
+which in vector form $z=(x,\eta)^{\!\top}$ reads $\dd z = Az\,\dd t + G\,\dd W$ with
+\begin{equation}
+A = \begin{pmatrix} -\kk & 1 \\ 0 & -w \end{pmatrix},
+\qquad
+Q \;=\; GG^{\!\top} \;=\; \diag\!\left(2\Tp,\; \frac{2\Ta}{\tauu^{2}}\right),
+\qquad w \equiv \frac{1}{\tauu}.
+\label{eq:AQ}
+\end{equation}
+
+Because the drift is linear, $z_t \mid z_0$ is exactly Gaussian,
+\begin{equation}
+z_t \mid z_0 \;\sim\; \mathcal{N}\!\big(e^{At}z_0,\; M(t)\big),
+\qquad
+M(t) \;=\; \int_0^t e^{As}\,Q\,e^{A^{\!\top}\!s}\,\dd s .
+\label{eq:M}
+\end{equation}
+
+Every part of the pipeline depends on $M$:
+\begin{enumerate}\itemsep2pt
+\item \textbf{Forward noising.} A Cholesky factor of $M(t)$ converts white noise into the
+      correlated pair $(d_x,d_\eta)$ added to the mean. This is the training data.
+\item \textbf{The loss.} The denoising target is built from $M_{11},M_{12},M_{22}$ and
+      $\det M$; see the companion loss note.
+\item \textbf{The Tweedie correction} at the end of sampling, which evaluates
+      $M(t_\varepsilon)$ at the smallest time on the grid.
+\end{enumerate}
+An error in $M$ therefore corrupts the data, the labels, and the final denoising step
+simultaneously.
+
+\section{The closed form, and its two failure modes}
+
+The integral \eqref{eq:M} can be evaluated by hand. Writing $a=e^{-\kk t}$, $b=e^{-wt}$,
+$T_x=\Tp$, $T_y=\Ta/\tauu^{2}$, the result previously used in the code was
+\begin{align}
+M_{11} &= \frac{T_x}{\kk}\left(1-a^{2}\right)
+        + \frac{T_y}{\kk}\left[
+            \frac{1}{w(\kk+w)}
+          + \frac{4abk}{(\kk+w)(\kk-w)^{2}}
+          - \frac{\kk b^{2}+w a^{2}}{w(\kk-w)^{2}}
+          \right], \label{eq:oldM11}\\
+M_{12} &= \frac{T_y}{w(\kk^{2}-w^{2})}
+          \Big[\kk\left(1-b^{2}\right) - w\left(1+b^{2}-2ab\right)\Big],
+          \label{eq:oldM12}\\
+M_{22} &= \frac{T_y}{w}\left(1-b^{2}\right). \label{eq:oldM22}
+\end{align}
+These expressions are algebraically correct and numerically unusable.
+
+\subsection{Failure 1: the removable singularity at $\kk\tauu=1$}
+
+When $\kk\tauu=1$ we have $w=\kk$, so $(\kk-w)^{2}=0$ in \eqref{eq:oldM11} and
+$\kk^{2}-w^{2}=0$ in \eqref{eq:oldM12}. Evaluating either expression raises a division by
+zero. The limit exists --- the singularity is \emph{removable} --- but the formula cannot
+reach it.
+
+The underlying reason is structural. At $\kk\tauu=1$ the matrix $A$ becomes
+\emph{defective}: it has the repeated eigenvalue $-\kk$ with only one eigenvector, i.e.\ a
+single $2\times2$ Jordan block,
+\begin{equation}
+A = -\kk I + N,\qquad N=\begin{pmatrix}0&1\\0&0\end{pmatrix},\quad N^{2}=0
+\qquad\Longrightarrow\qquad
+e^{At} = e^{-\kk t}\begin{pmatrix}1 & t\\ 0 & 1\end{pmatrix}.
+\label{eq:jordan}
+\end{equation}
+Any closed form obtained by diagonalising $A$ carries $1/(\lambda_1-\lambda_2)$ factors and
+\emph{must} blow up there. This is why the $\kk\tauu=1$ arm of the $\tauu$ sweep
+($\tauu=0.25$ at $\kk=4$) could not be run at all before the change.
+
+\subsection{Failure 2: catastrophic cancellation at small $t$}
+
+Away from the singularity the formula still fails, more insidiously. As $t\to0$,
+$M_{11}\to 2\Tp t$, which is minute; but \eqref{eq:oldM11} assembles it from terms of order
+$T_y/[\kk(\kk-w)^{2}]$. At $\tauu=0.2$, $\kk=4$ these individual terms are
+\begin{equation}
+\frac{T_y}{\kk}\cdot\frac{4abk}{(\kk+w)(\kk-w)^{2}} \approx 71,
+\qquad
+\frac{T_y}{\kk}\cdot\frac{\kk b^{2}+wa^{2}}{w(\kk-w)^{2}} \approx 72,
+\end{equation}
+whose difference must yield a contribution of order $10^{-8}$. That is nine to ten orders
+of cancellation; \texttt{float32} carries about seven decimal digits, so nothing survives.
+
+Table~\ref{tab:err} gives the measured relative error of \eqref{eq:oldM11} in
+\texttt{float32} against the exact value, for the parameters actually used
+($\kk=4$, $\Ta=6.4$, $\Tp=10^{-3}$).
+
+\begin{table}[h]
+\centering\small\setlength{\tabcolsep}{4.2pt}
+\begin{tabular}{rr rrrrrr}
+\toprule
+$\tauu$ & $\kk-1/\tauu$ & $t=10^{-3}$ & $10^{-2}$ & $0.05$ & $0.2$ & $1.0$ & $2.0$\\
+\midrule
+$0.15$ & $-2.67$ & $2.5\times10^{-1}$ & $3.1\times10^{-3}$ & $3.3\times10^{-5}$ & $2.2\times10^{-6}$ & $7.5\times10^{-7}$ & $7.4\times10^{-7}$\\
+$0.20$ & $-1.00$ & $\mathbf{2.4\times10^{0}}$ & $6.9\times10^{-3}$ & $9.0\times10^{-4}$ & $1.7\times10^{-6}$ & $4.5\times10^{-7}$ & $4.9\times10^{-7}$\\
+$0.25$ & $0$ & \multicolumn{6}{c}{\emph{division by zero}}\\
+$0.40$ & $+1.50$ & $5.5\times10^{-1}$ & $6.0\times10^{-3}$ & $9.8\times10^{-5}$ & $2.9\times10^{-6}$ & $1.1\times10^{-7}$ & $9.9\times10^{-8}$\\
+$0.50$ & $+2.00$ & $2.3\times10^{-2}$ & $4.2\times10^{-3}$ & $6.5\times10^{-5}$ & $1.0\times10^{-7}$ & $1.8\times10^{-7}$ & $1.5\times10^{-7}$\\
+$1.00$ & $+3.00$ & $5.9\times10^{-3}$ & $2.9\times10^{-4}$ & $4.1\times10^{-5}$ & $3.1\times10^{-6}$ & $1.7\times10^{-7}$ & $1.3\times10^{-7}$\\
+\bottomrule
+\end{tabular}
+\caption{Relative error of the closed form \eqref{eq:oldM11} in \texttt{float32}.
+The error grows as $|\kk-1/\tauu|\to0$. At $\tauu=0.2$ it exceeds $100\%$: the returned
+$M_{11}$ bears no relation to the true value, and the resulting matrix can fail to be
+positive definite, which is precisely how the Cholesky factorisation crashed. Damage is
+confined to $t\lesssim0.05$ --- which is exactly where fine image detail is set.}
+\label{tab:err}
+\end{table}
+
+The $+10^{-8}$ constants added to $M_{11}$ and $M_{22}$ in the original implementation were
+an attempt to suppress the symptom.
+
+\section{The trick, first in one dimension}
+
+Consider the scalar inhomogeneous linear ODE
+\begin{equation}
+\dot y = ay + q,\qquad y(0)=0
+\qquad\Longrightarrow\qquad
+y(t) = \frac{q\left(e^{at}-1\right)}{a}.
+\end{equation}
+Now exponentiate the augmented matrix obtained by appending the constant $q$ as an extra
+column with a zero row:
+\begin{equation}
+\exp\!\left[t\begin{pmatrix}a & q\\ 0 & 0\end{pmatrix}\right]
+=\begin{pmatrix} e^{at} & \dfrac{q\left(e^{at}-1\right)}{a}\\[2ex] 0 & 1\end{pmatrix}.
+\label{eq:scalar}
+\end{equation}
+The solution sits in the top-right entry. Nothing subtle occurred: appending a constant row
+converts an \emph{inhomogeneous} linear ODE into a \emph{homogeneous} one, and homogeneous
+linear ODEs with constant coefficients are exactly what matrix exponentials solve. The
+forcing term has been absorbed into the generator.
+
+Van Loan's identity is this same manoeuvre for matrices.
+
+\section{Derivation}
+
+\subsection{$M$ satisfies a Lyapunov ODE}
+
+Differentiating \eqref{eq:M} with Leibniz' rule,
+\begin{equation}
+\dot M = A M + M A^{\!\top} + Q, \qquad M(0)=0.
+\label{eq:lyap}
+\end{equation}
+This has the same shape as the scalar case: linear in the unknown, plus a constant forcing
+$Q$. So we apply the same augmentation.
+
+\subsection{The block generator}
+
+Define the $4\times4$ matrix and its exponential,
+\begin{equation}
+C \;=\; \begin{pmatrix} -A & Q\\ 0 & A^{\!\top}\end{pmatrix},
+\qquad
+E(t) \;=\; e^{Ct}.
+\label{eq:C}
+\end{equation}
+Since $C$ is block upper triangular, so is $E(t)$, and the diagonal blocks exponentiate
+independently:
+\begin{equation}
+E(t) = \begin{pmatrix} E_{11}(t) & E_{12}(t)\\ 0 & E_{22}(t)\end{pmatrix}
+     = \begin{pmatrix} e^{-At} & E_{12}(t)\\ 0 & e^{A^{\!\top}\!t}\end{pmatrix}.
+\label{eq:blocks}
+\end{equation}
+
+\subsection{The off-diagonal block}
+
+Read the $(1,2)$ block off $\dot E = CE$:
+\begin{equation}
+\dot E_{12} = -A\,E_{12} + Q\,e^{A^{\!\top}\!t},\qquad E_{12}(0)=0.
+\end{equation}
+Multiply by the integrating factor $e^{At}$:
+\begin{equation}
+e^{At}\dot E_{12} + e^{At}A\,E_{12}
+\;=\;
+\frac{\dd}{\dd t}\Big(e^{At}E_{12}\Big)
+\;=\;
+e^{At}\,Q\,e^{A^{\!\top}\!t}.
+\label{eq:exact}
+\end{equation}
+The left-hand side is now an exact derivative, and the right-hand side is precisely the
+integrand of \eqref{eq:M}. Integrating from $0$ to $t$ and using $E_{12}(0)=0$,
+\begin{equation}
+e^{At}E_{12}(t) \;=\; \int_0^t e^{As}Qe^{A^{\!\top}\!s}\,\dd s \;=\; M(t).
+\end{equation}
+Finally $E_{22}(t)=e^{A^{\!\top}\!t}$, so $E_{22}(t)^{\!\top}=e^{At}$, giving
+
+\begin{equation}
+\boxed{\;M(t) \;=\; E_{22}(t)^{\!\top}\,E_{12}(t)\;}
+\label{eq:vanloan}
+\end{equation}
+
+\noindent
+where $E_{12}$ and $E_{22}$ are the top-right and bottom-right $2\times2$ blocks of
+$e^{Ct}$. One matrix exponential; no denominators; no case analysis.
+
+The interpretive point: the integral was never something that had to be \emph{evaluated}.
+It is a block of an exponential, because its integrand solves a linear ODE. The closed form
+\eqref{eq:oldM11}--\eqref{eq:oldM22} was one particular way of unpacking that block by
+hand, and a numerically poor one.
+
+\section{Implementation}
+
+\begin{verbatim}
+def compute_covariance(self, t):
+    k  = float(self.k);  w  = 1.0 / float(self.tau)
+    Tx = float(self.Tp); Ty = float(self.Ta) / float(self.tau) ** 2
+    A = torch.tensor([[-k, 1.0], [0.0, -w]],   dtype=torch.float64)
+    Q = torch.tensor([[2*Tx, 0.0], [0.0, 2*Ty]],
+                     dtype=torch.float64)
+    Z = torch.zeros(2, 2, dtype=torch.float64)
+    C = torch.cat([torch.cat([-A, Q], 1), torch.cat([Z, A.T], 1)], 0)
+    E   = torch.linalg.matrix_exp(C * t.double().reshape(-1, 1, 1))
+    cov = E[:, 2:, 2:].transpose(-1, -2) @ E[:, :2, 2:]   # E22^T E12
+    cov = 0.5 * (cov + cov.transpose(-1, -2))        # symmetrise
+    return cov.to(t.dtype)
+\end{verbatim}
+
+The assembly is done in \texttt{float64} and cast down once at the end. The explicit
+symmetrisation removes the $O(10^{-16})$ asymmetry left by finite precision, which matters
+only because Cholesky rejects non-symmetric input.
+
+\subsection{Why this is numerically stable}
+
+\begin{itemize}\itemsep3pt
+\item \texttt{matrix\_exp} uses scaling-and-squaring with Pad\'e approximants: it evaluates
+      $e^{Ct/2^{n}}$ from a series whose terms are of comparable magnitude, then squares
+      $n$ times. The differences of nearly-equal exponentials that destroy
+      \eqref{eq:oldM11} never form.
+\item It never diagonalises $A$, so the defective case \eqref{eq:jordan} needs no special
+      handling --- $e^{At}=e^{-\kk t}\big(I+Nt\big)$ emerges automatically. The
+      $\kk\tauu=1$ point is not special to the algorithm.
+\item Nothing in \eqref{eq:C} involves $\kk-w$, $\kk+w$, or any other denominator that can
+      vanish.
+\end{itemize}
+
+\subsection{Cost}
+
+One $4\times4$ \texttt{matrix\_exp} per batch element per step, in \texttt{float64}. It is
+evaluated per time value, not per pixel, so at batch $128$ it is negligible beside the UNet
+forward pass; measured epoch time was unchanged by the switch.
+
+\section{Numerical verification}
+
+Two checks, both against the shipped implementation.
+
+\paragraph{The identity itself.} Comparing $E_{22}^{\!\top}E_{12}$ against direct
+quadrature of \eqref{eq:M} on a $4\times10^{5}$-point grid:
+
+\begin{center}
+\begin{tabular}{llll}
+\toprule
+$\tauu$ & $t$ & $\max\big|\text{Van Loan}-\text{quadrature}\big|$ & $M_{11}$\\
+\midrule
+$0.25$ & $0.05$ & $7.1\times10^{-13}$ & $6.423485\times10^{-3}$\\
+$0.25$ & $0.5$  & $2.1\times10^{-10}$ & $6.097628\times10^{-1}$\\
+$0.25$ & $2.0$  & $3.4\times10^{-9}$  & $8.002369\times10^{-1}$\\
+$0.50$ & $0.05$ & $4.5\times10^{-14}$ & $1.789678\times10^{-3}$\\
+$0.50$ & $2.0$  & $4.3\times10^{-10}$ & $5.325359\times10^{-1}$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+The residual is the trapezoid rule's discretisation error, not Van Loan's. Note that
+$\tauu=0.25$ is included: the closed form does not exist there, but the block exponential
+is unremarkable.
+
+\paragraph{Structure.} At $\tauu=0.25$, $t=0.7$: $E_{11}=e^{-At}$, $E_{22}=e^{A^{\!\top}\!t}$
+and the lower-left block vanishes, all to \texttt{allclose} tolerance --- confirming
+\eqref{eq:blocks}.
+
+\section{Companion fixes}
+
+The same defect appears in the \emph{mean}. The $(1,2)$ entry of $e^{At}$ is
+\begin{equation}
+b(t) \;=\; \int_0^t e^{-\kk(t-s)}e^{-ws}\,\dd s
+      \;=\; e^{-\kk t}\,\frac{e^{dt}-1}{d},\qquad d \equiv \kk - w,
+\end{equation}
+which is $0/0$ at $\kk\tauu=1$ with limit $t\,e^{-\kk t}$, consistent with
+\eqref{eq:jordan}. Two changes were required:
+\begin{itemize}\itemsep2pt
+\item an explicit branch, \texttt{b = t*a if abs(d) < 1e-8 else a*torch.expm1(d*t)/d};
+\item \texttt{expm1} in place of \texttt{exp(x)-1}. For small $x$, $e^{x}-1$ loses almost
+      every significant digit to cancellation (at $x=10^{-8}$ in \texttt{float32},
+      $e^{x}$ rounds to $1$ and the difference is $0$), whereas \texttt{expm1} evaluates
+      the quantity directly.
+\end{itemize}
+The same treatment was applied at every site where these expressions appear: the training
+loss, the Tweedie correction, the equilibrium transition, and both reverse-transition
+routines of the SSCS sampler.
+
+\section{Consequences for the recorded results}
+
+Because $M$ enters the noising, the labels and the Tweedie step, all runs trained before
+this change used a corrupted forward process at small $t$. Results measured on those
+checkpoints remain valid statements about \emph{those models}, but they are not
+reproducible from the current code, and comparisons across the boundary are confounded with
+the numerical error --- which varies by arm, being largest exactly where $|\kk-1/\tauu|$ is
+smallest. This is recorded per-arm in the results note.
+
+\section{Generalisation}
+
+Equation \eqref{eq:vanloan} makes no use of the specific $A$ and $Q$ in \eqref{eq:AQ}. It
+holds for any linear SDE in any dimension. Adding a second persistent mode, giving $\kk$
+matrix structure, or coupling colour channels requires only writing down the new $A$ and
+$Q$; \texttt{compute\_covariance} is unchanged. That robustness to model changes, rather
+than the numerics alone, is the strongest argument for the method.
+
+\begin{thebibliography}{9}
+\bibitem{vanloan1978}
+C.~F.~Van Loan,
+\emph{Computing integrals involving the matrix exponential},
+IEEE Transactions on Automatic Control \textbf{23}(3), 395--404, 1978.
+\bibitem{higham2005}
+N.~J.~Higham,
+\emph{The scaling and squaring method for the matrix exponential revisited},
+SIAM Journal on Matrix Analysis and Applications \textbf{26}(4), 1179--1193, 2005.
+\end{thebibliography}
+
+\end{document}

@@ -1,0 +1,94 @@
+# Active Diffusion
+
+Score-based generative models driven by **active matter** dynamics: instead of the
+standard Ornstein–Uhlenbeck forward process, image pixels are coupled to a persistent
+coloured-noise field $\eta$ with correlation time $\tau$.
+
+```
+passive (baseline)      dx = -k·x dt + √(2Tp) dW
+
+active                  dx = (-k·x + η) dt + √(2Tp) dW_x
+                        dη = (-η/τ)     dt + (√(2Ta)/τ) dW_η
+```
+
+The forward kernel is Gaussian in the joint variable $z=(x,\eta)$, so the model learns the
+joint score $\nabla \log p_t(x,\eta)$ and samples by reverse-time integration of the
+two-variable SDE (or its probability-flow ODE).
+
+---
+
+## Current result — CIFAR-10, unconditional
+
+| model | FID | notes |
+|---|---|---|
+| **active, conditional whitening** | **4.98** | τ=0.5, epoch 1000 |
+| active, original loss | 6.91 | same epoch, same sampler |
+| *published reference:* DDPM | 3.17 | |
+| *published reference:* CLD | 2.25 | ~2× the parameters, longer training |
+
+Measured with `clean-fid` (`legacy_pytorch`) against the CIFAR-10 train split,
+N = 50,000, quadratic probability-flow sampler at 500 steps, Heun solver.
+
+The two active rows differ **only** in the loss weighting — same architecture, optimizer,
+EMA, batch size, schedule and SDE. See [`CIFAR10/whitening_note.pdf`](CIFAR10/whitening_note.pdf).
+
+---
+
+## Layout
+
+| Directory | Contents |
+|---|---|
+| [`CIFAR10/`](CIFAR10/) | Main experiments — training, sampling, FID, results log |
+| [`MNIST/`](MNIST/) | Earlier single-channel prototype |
+| [`Belief_Propagation/`](Belief_Propagation/) | Separate line of work |
+
+Start with [`CIFAR10/README.md`](CIFAR10/README.md) for how to train and sample, and
+[`CIFAR10/FID_RESULTS.md`](CIFAR10/FID_RESULTS.md) for the full experimental record —
+every run, its configuration, and what is and isn't reproducible.
+
+---
+
+## Technical notes
+
+Four standalone write-ups, each with LaTeX source alongside:
+
+| Note | Subject |
+|---|---|
+| [`vanloan_note.pdf`](CIFAR10/vanloan_note.pdf) | Van Loan's method for the transition covariance: why the integral is a block of a matrix exponential, and why the hand-derived closed form failed |
+| [`whitening_note.pdf`](CIFAR10/whitening_note.pdf) | The loss whitening: why a single `√det M` cannot whiten two channels, and the per-channel fix |
+| [`loss_comparison_note.pdf`](CIFAR10/loss_comparison_note.pdf) | Active vs passive losses, comparison with CLD, the τ→0 limit |
+| [`active_sscs_sampler_note.pdf`](CIFAR10/active_sscs_sampler_note.pdf) | The symmetric splitting (SSCS) sampler |
+| [`tweedie_denoising_note.pdf`](CIFAR10/tweedie_denoising_note.pdf) | The final Tweedie denoising step |
+
+---
+
+## Two findings worth knowing before reusing this code
+
+**1. The transition covariance must be computed by Van Loan's method, not in closed form.**
+The covariance $M(t)=\int_0^t e^{As}Qe^{A^\top s}\,ds$ has a hand-derived closed form with
+$(k-1/\tau)^2$ in the denominator. It divides by zero at $k\tau=1$ (where the drift matrix
+is defective — a Jordan block) and loses all precision to cancellation at small $t$
+elsewhere: measured relative error in $M_{11}$ at $t=10^{-3}$ reaches **241%** at τ=0.2,
+which is enough to make the matrix non-positive-definite and crash the Cholesky. The
+current implementation obtains $M$ as a block of a single 4×4 matrix exponential, which is
+exact at every τ.
+
+**2. The active loss needs per-channel whitening.** The passive loss is whitened —
+`σ·score = −ε` has unit variance at every noise level. The active loss originally used the
+scalar `√det M` for both channels, but `√det M = √v_x·√M₂₂ = √v_η·√M₁₁`, so it is the
+correct whitener times a spurious factor. At τ=0.5 the η target collapsed by 515× between
+t=T and t=10⁻³. Whitening each channel by its own conditional standard deviation restores
+unit-variance targets and accounts for the 6.91 → 4.98 improvement.
+
+Both changes are verified in [`CIFAR10/redteam_cond.py`](CIFAR10/redteam_cond.py) and
+[`CIFAR10/redteam_cond_weights.py`](CIFAR10/redteam_cond_weights.py), which check the
+shipped classes rather than a reimplementation.
+
+---
+
+## Reproducibility
+
+Results predating the Van Loan patch (commit `1b25438`) were trained against a numerically
+corrupted forward process and **cannot be reproduced from the current code**. They are
+flagged individually in `FID_RESULTS.md`. Do not compare across that boundary: the error
+varies per arm, being largest where $|k - 1/\tau|$ is smallest.
